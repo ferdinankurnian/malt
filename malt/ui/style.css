@@ -1,0 +1,23 @@
+/* Flat sidebar background */
+.sidebar {
+    background: #2E2E32;
+    border-right: 1px solid alpha(@borders, 0.5);
+}
+
+/* Project card items */
+.project-card {
+    padding: 8px 12px;
+    border-radius: 8px;
+}
+
+.project-card:hover {
+    background: alpha(@borders, 0.15);
+}
+
+.project-card-selected {
+    background: alpha(@borders, 0.25);
+}
+
+.project-card-selected:hover {
+    background: alpha(@borders, 0.35);
+}
