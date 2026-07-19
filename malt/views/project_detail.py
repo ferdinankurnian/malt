@@ -19,7 +19,7 @@ class ProjectDetail(Gtk.Box):
         self._action_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self._action_bar.set_margin_start(24)
         self._action_bar.set_margin_end(24)
-        self._action_bar.set_margin_top(16)
+        self._action_bar.set_margin_top(12)
         self._action_bar.set_margin_bottom(12)
 
         # Left side: project name + status
