@@ -1,6 +1,16 @@
-# malt
+<p align="center">
+  <img src="assets/malt-default.png" alt="malt" width="100">
+</p>
 
-Manage multiple project MCP servers from one dashboard.
+<h1 align="center">malt</h1>
+
+<p align="center">
+  Manage multiple project MCP servers from one dashboard.
+</p>
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="screenshot" width="700">
+</p>
 
 A GTK4/libadwaita desktop app that lets you run and manage [Model Context Protocol](https://modelcontextprotocol.io/) servers for multiple projects.
 
@@ -9,7 +19,7 @@ A GTK4/libadwaita desktop app that lets you run and manage [Model Context Protoc
 - **Multi-project management** — create, edit, and delete projects from a sidebar
 - **Server controls** — start/stop MCP servers per project
 - **Token auth** — each project gets a unique auth token, regenerable anytime
-- **Allowed commands** — whitelist specific CLI tools per project (execute/admin permission)
+- **Admin god mode** — run any command without whitelist restrictions
 - **Tunnel support** — expose local MCP servers via cloudflared tunnels
 - **Status indicators** — green/grey dot in sidebar shows server state
 - **Keyboard shortcut** — press `Esc` to deselect and return to empty state
@@ -47,12 +57,12 @@ malt
 
 ### Permissions
 
-| Level    | Tools                                                      |
-|----------|------------------------------------------------------------|
-| `read`   | list_directory, read_file                                  |
-| `write`  | list_directory, read_file, write_file                      |
-| `execute`| list_directory, read_file, write_file, run_command         |
-| `admin`  | list_directory, read_file, write_file, run_command, manage |
+| Level     | Tools                                                             |
+|-----------|-------------------------------------------------------------------|
+| `read`    | list_directory, read_file                                         |
+| `write`   | list_directory, read_file, write_file                             |
+| `execute` | list_directory, read_file, write_file, run_command (whitelisted)  |
+| `admin`   | list_directory, read_file, write_file, run_command (any command)  |
 
 ## Project Structure
 
@@ -64,6 +74,7 @@ malt/
 ├── settings.py          # App settings (tunnel hostname, default port)
 ├── security.py          # Allowed commands, permission levels
 ├── mcp_server.py        # MCP server factory
+├── server.py            # HTTP server + auth middleware
 ├── tunnel.py            # Cloudflared tunnel manager
 ├── ui/
 │   └── style.css        # Custom GTK CSS
