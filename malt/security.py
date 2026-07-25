@@ -22,7 +22,10 @@ ALLOWED_CMDS = {
 
 def safe_path(root_path: str, user_path: str) -> str:
     """Resolve user_path relative to root_path, blocking escapes."""
-    resolved = os.path.realpath(os.path.join(root_path, user_path))
-    if not resolved.startswith(root_path):
+    root_real = os.path.realpath(root_path)
+    resolved = os.path.realpath(os.path.join(root_real, user_path))
+    # must be root itself, or root + separator + something — plain startswith()
+    # would also let "/home/x/proj-evil" match root "/home/x/proj"
+    if resolved != root_real and not resolved.startswith(root_real + os.sep):
         raise ValueError("path escape blocked")
     return resolved

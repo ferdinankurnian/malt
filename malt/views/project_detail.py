@@ -1,11 +1,10 @@
 """Right panel — project config + server controls + logs."""
 
 import json
-from gi.repository import Gtk, Gdk, Pango
+from gi.repository import Gtk, Gdk, Pango, Adw
 
 from .. import db, settings
 from ..security import ALLOWED_CMDS, PERMISSION_LEVELS
-from ..mcp_server import create_mcp_server
 
 
 class ProjectDetail(Gtk.Box):
@@ -14,7 +13,9 @@ class ProjectDetail(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._project = None
-        self._mcp_server = None
+        self._server_mgr = None
+        self._tunnel_mgr = None
+        self._url_visible = settings.get("url_visible_by_default")
         # ── Top action bar (always visible, always the first thing) ──
         self._action_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self._action_bar.set_margin_start(24)
@@ -43,20 +44,10 @@ class ProjectDetail(Gtk.Box):
         self._start_btn.connect("clicked", self._on_toggle_server)
         right.append(self._start_btn)
 
-        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-        sep.set_margin_start(4)
-        sep.set_margin_end(4)
-        right.append(sep)
-
         self._copy_btn = Gtk.Button(label="Copy URL")
         self._copy_btn.set_tooltip_text("Copy MCP endpoint to clipboard")
         self._copy_btn.connect("clicked", self._on_copy_url)
         right.append(self._copy_btn)
-
-        sep2 = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
-        sep2.set_margin_start(4)
-        sep2.set_margin_end(4)
-        right.append(sep2)
 
         self._delete_btn = Gtk.Button(label="Delete")
         self._delete_btn.add_css_class("destructive-action")
@@ -99,11 +90,17 @@ class ProjectDetail(Gtk.Box):
         self._url_display.add_css_class("monospace")
         url_row.append(self._url_display)
 
-        regen_btn = Gtk.Button(label="Regen Token")
-        regen_btn.set_tooltip_text("Generate a new auth token (invalidates old one)")
-        regen_btn.add_css_class("flat")
-        regen_btn.connect("clicked", self._on_regen_token)
-        url_row.append(regen_btn)
+        self._toggle_url_btn = Gtk.Button()
+        self._toggle_url_btn.set_icon_name("view-conceal-symbolic")
+        self._toggle_url_btn.set_tooltip_text("Show/hide URL")
+        self._toggle_url_btn.add_css_class("flat")
+        self._toggle_url_btn.connect("clicked", self._on_toggle_url)
+        url_row.append(self._toggle_url_btn)
+
+        self._regen_btn = Gtk.Button(label="Regen Token")
+        self._regen_btn.set_tooltip_text("Generate a new auth token (invalidates old one)")
+        self._regen_btn.connect("clicked", self._on_regen_token)
+        url_row.append(self._regen_btn)
 
         url_group.append(url_row)
         content.append(url_group)
@@ -215,8 +212,14 @@ class ProjectDetail(Gtk.Box):
             store.append(cmd)
         self._cmd_dropdown.set_model(store)
 
+    def set_managers(self, server_mgr, tunnel_mgr):
+        self._server_mgr = server_mgr
+        self._tunnel_mgr = tunnel_mgr
+
     def _perm_description(self, perm: str) -> str:
         tools = PERMISSION_LEVELS.get(perm, [])
+        if perm == "admin":
+            return f"Tools: {', '.join(tools)} + run any command"
         return f"Tools: {', '.join(tools)}" if tools else ""
 
     def set_project(self, project: dict | None):
@@ -245,10 +248,11 @@ class ProjectDetail(Gtk.Box):
         self._refresh_cmd_list()
         self._update_url()
         perm = project["permission"]
-        self._cmd_section.set_visible(perm in ("execute", "admin"))
+        self._cmd_section.set_visible(perm == "execute")
         self._start_btn.set_sensitive(True)
         self._copy_btn.set_sensitive(True)
-        self._set_server_button(stopped=True)
+        running = bool(self._server_mgr and self._server_mgr.is_project_running(project["id"]))
+        self._set_server_button(stopped=not running)
 
     def _clear_cmd_list(self):
         while True:
@@ -314,7 +318,7 @@ class ProjectDetail(Gtk.Box):
         if perm and self._project:
             db.update_project(self._project["id"], permission=perm)
             self._project["permission"] = perm
-            self._cmd_section.set_visible(perm in ("execute", "admin"))
+            self._cmd_section.set_visible(perm == "execute")
             self._perm_desc.set_label(self._perm_description(perm))
 
     def _update_url(self):
@@ -325,14 +329,25 @@ class ProjectDetail(Gtk.Box):
         token = self._project["token"]
         hostname = settings.get("tunnel_hostname")
         url = f"https://{hostname}/mcp/{pid}?token={token}"
-        self._url_display.set_label(url)
         self._url_display.set_tooltip_text(url)
+        if self._url_visible:
+            self._url_display.set_label(url)
+        else:
+            self._url_display.set_label("•" * 40)
 
     def _on_copy_url(self, button):
         url = self._url_display.get_tooltip_text() or self._url_display.get_label()
         if url:
             clipboard = Gdk.Display.get_default().get_clipboard()
             clipboard.set(url)
+
+    def _on_toggle_url(self, button):
+        self._url_visible = not self._url_visible
+        if self._url_visible:
+            self._toggle_url_btn.set_icon_name("view-reveal-symbolic")
+        else:
+            self._toggle_url_btn.set_icon_name("view-conceal-symbolic")
+        self._update_url()
 
     def _on_regen_token(self, button):
         if not self._project:
@@ -348,34 +363,48 @@ class ProjectDetail(Gtk.Box):
             self._start_btn.remove_css_class("destructive-action")
             self._start_btn.add_css_class("suggested-action")
             self._start_btn.set_tooltip_text("Start MCP server")
+            self._regen_btn.set_sensitive(True)
+            self._regen_btn.set_tooltip_text(
+                "Generate a new auth token (invalidates old one)"
+            )
         else:
             self._start_btn.set_label("Stop")
             self._start_btn.remove_css_class("suggested-action")
             self._start_btn.add_css_class("destructive-action")
             self._start_btn.set_tooltip_text("Stop MCP server")
+            self._regen_btn.set_sensitive(False)
+            self._regen_btn.set_tooltip_text(
+                "Stop the server before regenerating the token"
+            )
 
     def on_status_change(self, callback):
         self._on_status_change = callback
 
     def _on_toggle_server(self, button):
-        if self._mcp_server is not None:
-            self._mcp_server = None
+        if not self._project or not self._server_mgr:
+            return
+        pid = self._project["id"]
+
+        if self._server_mgr.is_project_running(pid):
+            self._server_mgr.stop_project(pid)
             self._set_server_button(stopped=True)
             self.append_log("server", "Stopped")
-            if self._on_status_change and self._project:
-                self._on_status_change(self._project["id"], False)
-        else:
-            if not self._project:
-                return
-            try:
-                self._mcp_server = create_mcp_server(self._project)
-                port = self._project.get("mcp_port", 3100)
-                self._set_server_button(stopped=False)
-                self.append_log("server", f"Started on port {port}")
-                if self._on_status_change:
-                    self._on_status_change(self._project["id"], True)
-            except Exception as e:
-                self.append_log("error", str(e))
+            if self._on_status_change:
+                self._on_status_change(pid, False)
+            return
+
+        try:
+            port = settings.get("default_mcp_port")
+            self._server_mgr.start_project(self._project, port)
+            hostname = settings.get("tunnel_hostname")
+            if hostname and self._tunnel_mgr:
+                self._tunnel_mgr.start(hostname, port)
+            self._set_server_button(stopped=False)
+            self.append_log("server", f"Started on port {port}")
+            if self._on_status_change:
+                self._on_status_change(pid, True)
+        except Exception as e:
+            self.append_log("error", str(e))
 
     def _update_log_count(self):
         if not self._project:
@@ -435,8 +464,8 @@ class ProjectDetail(Gtk.Box):
 
         def confirm_delete(b):
             pid = self._project["id"]
-            if self._mcp_server is not None:
-                self._mcp_server = None
+            if self._server_mgr and self._server_mgr.is_project_running(pid):
+                self._server_mgr.stop_project(pid)
             db.delete_project(pid)
             dialog.close()
             if self._on_deleted:

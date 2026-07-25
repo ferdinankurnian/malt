@@ -8,6 +8,7 @@ SETTINGS_PATH = Path.home() / ".config" / "malt" / "settings.json"
 DEFAULTS = {
     "tunnel_hostname": "mcp.iydheko.site",
     "default_mcp_port": 3100,
+    "url_visible_by_default": False,
 }
 
 

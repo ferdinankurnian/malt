@@ -21,3 +21,8 @@
 .project-card-selected:hover {
     background: alpha(@borders, 0.35);
 }
+
+/* Active indicator dot */
+.success {
+    color: #26a269;
+}

@@ -3,7 +3,10 @@
 import gi
 
 gi.require_version("cairo", "1.0")
-from gi.repository import Gtk, Gdk, cairo
+# cairo import itself is unused by name, but PyGObject needs it imported
+# here so it registers the Cairo Context type used by draw_func's `cr` arg —
+# don't let --fix strip it.
+from gi.repository import Gtk, Gdk, cairo  # noqa: E402,F401
 
 
 _STATUS_COLORS = {

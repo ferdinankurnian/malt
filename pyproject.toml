@@ -12,6 +12,7 @@ dependencies = [
     "mcp[cli]>=1.28",
     "PyGObject>=3.50",
     "starlette",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]
