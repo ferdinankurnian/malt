@@ -5,7 +5,7 @@
 <h1 align="center">malt</h1>
 
 <p align="center">
-  Manage multiple project MCP servers from one dashboard.
+  Publish and manage project folders via MCP servers
 </p>
 
 <p align="center">
