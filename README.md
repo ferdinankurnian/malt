@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/malt-default.png" alt="malt" width="100">
+  <img src="assets/malt-rounded.png" alt="malt" width="100">
 </p>
 
 <h1 align="center">malt</h1>
