@@ -12,7 +12,7 @@
   <img src="assets/screenshot.png" alt="screenshot" width="700">
 </p>
 
-A GTK4/libadwaita desktop app that lets you run and manage [Model Context Protocol](https://modelcontextprotocol.io/) servers for multiple projects.
+A GTK4/libadwaita desktop app that lets you publish and manage project folders via MCP servers.
 
 ## Features
 
