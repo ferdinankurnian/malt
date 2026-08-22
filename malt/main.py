@@ -13,7 +13,7 @@ from . import db, settings  # noqa: E402
 from .models import Project  # noqa: E402
 from .views.project_list import ProjectList  # noqa: E402
 from .views.project_detail import ProjectDetail  # noqa: E402
-from .tunnel import TunnelManager  # noqa: E402
+from .tunnel import TunnelManager, detect_cloudflared, detect_ngrok  # noqa: E402
 from .server import ServerManager  # noqa: E402
 
 
@@ -48,14 +48,22 @@ class MaltApp(Adw.Application):
 
         toast_overlay = Adw.ToastOverlay()
 
-        layout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        toast_overlay.set_child(layout)
+        self._paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        toast_overlay.set_child(self._paned)
 
-        # Sidebar — full height
+        # Sidebar — full height, resizable via paned divider
         self.project_list = ProjectList()
         self.project_list.set_size_request(200, -1)
-        self.project_list.set_hexpand(False)
-        layout.append(self.project_list)
+        self.project_list.set_hexpand(True)
+        self._paned.set_start_child(self.project_list)
+
+        saved_width = settings.get("sidebar_width") or 260
+        saved_width = min(saved_width, 450)
+        self._paned.set_position(saved_width)
+        self._last_sidebar_width = saved_width
+        self._paned.set_shrink_start_child(False)
+
+        self._paned.connect("notify::position", self._on_sidebar_resized)
 
         # Right side: header bar + detail panel
         right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -63,10 +71,34 @@ class MaltApp(Adw.Application):
 
         header = Adw.HeaderBar()
         header.add_css_class("flat")
+        header.set_show_title(True)
 
-        # Active projects indicator (left side)
+        sidebar_toggle = Gtk.ToggleButton()
+        sidebar_toggle.set_icon_name("view-sidebar-symbolic")
+        sidebar_toggle.set_active(True)
+        sidebar_toggle.set_tooltip_text("Toggle sidebar")
+        sidebar_toggle.add_css_class("flat")
+        self._sidebar_visible = True
+        sidebar_toggle.connect(
+            "toggled",
+            self._on_sidebar_toggle,
+        )
+        header.pack_start(sidebar_toggle)
+
+        # Settings button on the right side of header
+        settings_btn = Gtk.Button()
+        settings_btn.set_icon_name("preferences-system-symbolic")
+        settings_btn.set_tooltip_text("Settings")
+        settings_btn.add_css_class("flat")
+        settings_btn.connect("clicked", self._on_settings)
+        header.pack_end(settings_btn)
+
+        # Active projects indicator centered in the header.
         self._active_btn = Gtk.MenuButton()
         self._active_btn.add_css_class("flat")
+        self._active_btn.set_always_show_arrow(False)
+        self._active_label = Gtk.Label()
+        self._active_btn.set_child(self._active_label)
         self._active_btn.set_visible(False)
         self._active_popover = Gtk.Popover()
         self._active_popover.set_position(Gtk.PositionType.BOTTOM)
@@ -77,13 +109,7 @@ class MaltApp(Adw.Application):
         self._active_list.set_margin_end(12)
         self._active_popover.set_child(self._active_list)
         self._active_btn.set_popover(self._active_popover)
-        header.pack_start(self._active_btn)
-
-        settings_btn = Gtk.Button()
-        settings_btn.set_icon_name("preferences-system-symbolic")
-        settings_btn.add_css_class("flat")
-        settings_btn.connect("clicked", self._on_settings)
-        header.pack_end(settings_btn)
+        header.set_title_widget(self._active_btn)
         right_box.append(header)
 
         # Detail panel — stack with empty state and detail
@@ -113,13 +139,15 @@ class MaltApp(Adw.Application):
         self._stack.set_visible_child_name("empty")
         right_box.append(self._stack)
 
-        layout.append(right_box)
+        self._paned.set_end_child(right_box)
 
         # Wire up
         self.project_list.on_select(self._on_project_selected)
         self.project_list.on_add(self._on_add_project)
+        self.project_list.on_settings(self._on_settings)
         self.detail.on_status_change(self._on_server_status_change)
         self.detail.on_deleted(self._on_project_deleted)
+        self.detail.on_icon_changed(self._on_icon_changed)
 
         # Escape to close project detail
         key_ctrl = Gtk.EventControllerKey()
@@ -133,6 +161,25 @@ class MaltApp(Adw.Application):
         self._win = win
         self._refresh_projects()
         win.present()
+
+    def _on_sidebar_toggle(self, button):
+        if button.get_active():
+            self._paned.set_position(self._last_sidebar_width or 260)
+            self._sidebar_visible = True
+        else:
+            self._last_sidebar_width = self._paned.get_position()
+            self._paned.set_position(0)
+            self._sidebar_visible = False
+
+    def _on_sidebar_resized(self, paned, _pspec):
+        pos = paned.get_position()
+        max_width = 450
+        if pos > max_width:
+            paned.set_position(max_width)
+            pos = max_width
+        if pos > 0:
+            self._last_sidebar_width = pos
+            settings.set("sidebar_width", pos)
 
     def _refresh_projects(self):
         rows = db.list_projects()
@@ -160,6 +207,9 @@ class MaltApp(Adw.Application):
                 "token": project.token,
                 "mcp_port": project.mcp_port,
                 "tunnel_enabled": project.tunnel_enabled,
+                "domain_id": project.domain_id,
+                "icon_mode": project.icon_mode,
+                "icon_path": project.icon_path,
             }
         )
         self._stack.set_visible_child_name("detail")
@@ -186,7 +236,7 @@ class MaltApp(Adw.Application):
 
         self._active_btn.set_visible(True)
         label = f"  {count} Project{'s' if count != 1 else ''} Active"
-        self._active_btn.set_label(label)
+        self._active_label.set_label(label.strip())
 
         # Rebuild popover list
         while True:
@@ -195,15 +245,41 @@ class MaltApp(Adw.Application):
                 break
             self._active_list.remove(child)
 
-        for name in self._running_projects.values():
+        from . import icons as icons_mod
+
+        for pid, name in self._running_projects.items():
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            dot = Gtk.Label(label="●")
-            dot.add_css_class("success")
-            row.append(dot)
+            # Resolve project for icon
+            proj = next((p for p in self.project_list._projects if p.id == pid), None)
+            if proj:
+                img = Gtk.Image()
+                icons_mod.apply_to_image(
+                    img,
+                    name=proj.name,
+                    project_id=proj.id,
+                    root_path=proj.root_path,
+                    icon_mode=getattr(proj, "icon_mode", "auto") or "auto",
+                    icon_path=getattr(proj, "icon_path", None),
+                    size=18,
+                )
+                row.append(img)
             lbl = Gtk.Label(label=name, xalign=0)
             lbl.set_hexpand(True)
             row.append(lbl)
             self._active_list.append(row)
+
+    def _on_icon_changed(self, project_id: str):
+        # Reload project data so sidebar card picks up new icon_mode/path
+        rows = db.list_projects()
+        projects = [Project.from_db_row(r) for r in rows]
+        self.project_list.set_projects(projects)
+        for p in projects:
+            if self.server_mgr.is_project_running(p.id):
+                self.project_list.set_project_status(p.id, True)
+        # Re-select current project if still selected
+        selected = self.project_list.get_selected_project()
+        if selected and selected.id == project_id:
+            self._on_project_selected(selected)
 
     def _on_project_deleted(self, project_id: str):
         self._refresh_projects()
@@ -211,7 +287,7 @@ class MaltApp(Adw.Application):
         self._stack.set_visible_child_name("empty")
 
     def _on_key_pressed(self, controller, keyval, keycode, state):
-        if keyval == 0xff1b:  # Escape
+        if keyval == 0xFF1B:  # Escape
             self.project_list.deselect_all()
             self.detail.set_project(None)
             self._stack.set_visible_child_name("empty")
@@ -300,8 +376,8 @@ class MaltApp(Adw.Application):
 
         dialog = Adw.Dialog()
         dialog.set_title("Settings")
-        dialog.set_content_width(500)
-        dialog.set_content_height(400)
+        dialog.set_content_width(560)
+        dialog.set_content_height(520)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
@@ -358,51 +434,223 @@ class MaltApp(Adw.Application):
         appearance_page.append(url_row)
 
         stack.add_titled(appearance_page, "appearance", "Appearance")
-        stack.get_page(appearance_page).set_icon_name("preferences-desktop-appearance-symbolic")
+        stack.get_page(appearance_page).set_icon_name(
+            "preferences-desktop-appearance-symbolic"
+        )
 
-        # ── Domains tab ──
-        domains_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        # ── Domains / Tunnel tab ──
+        domains_scroll = Gtk.ScrolledWindow()
+        domains_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        domains_scroll.set_vexpand(True)
+
+        domains_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         domains_page.set_margin_top(24)
         domains_page.set_margin_bottom(24)
         domains_page.set_margin_start(24)
         domains_page.set_margin_end(24)
 
-        domains_title = Gtk.Label(label="Domains", xalign=0)
+        domains_title = Gtk.Label(label="Tunnel & Domains", xalign=0)
         domains_title.add_css_class("title-2")
         domains_page.append(domains_title)
 
-        host_label = Gtk.Label(label="Tunnel Hostname", xalign=0)
-        host_label.add_css_class("caption")
-        host_label.add_css_class("dim-label")
-        domains_page.append(host_label)
+        # Provider status cards
+        cf = detect_cloudflared()
+        ng = detect_ngrok()
+
+        assets_dir = os.path.join(os.path.dirname(__file__), "..", "assets")
+
+        def _provider_icon(filename: str) -> Gtk.Widget:
+            path = os.path.join(assets_dir, filename)
+            if os.path.exists(path):
+                pic = Gtk.Picture.new_for_filename(path)
+                pic.set_size_request(20, 20)
+                pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+                pic.set_valign(Gtk.Align.CENTER)
+                return pic
+            return Gtk.Label(label="")
+
+        def _status_row(
+            name: str, ok: bool, detail: str, icon_file: str | None = None
+        ) -> Gtk.Box:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            if icon_file:
+                top.append(_provider_icon(icon_file))
+            mark = Gtk.Label(label="●")
+            mark.add_css_class("success" if ok else "error")
+            top.append(mark)
+            title = Gtk.Label(label=name, xalign=0)
+            title.add_css_class("heading")
+            title.set_hexpand(True)
+            top.append(title)
+            row.append(top)
+            sub = Gtk.Label(label=detail, xalign=0)
+            sub.add_css_class("caption")
+            sub.add_css_class("dim-label")
+            sub.set_wrap(True)
+            row.append(sub)
+            return row
+
+        cf_detail = (
+            f"Found · {cf.get('version') or cf.get('path')}"
+            if cf["found"]
+            else "Not found — install with: yay -S cloudflared"
+        )
+        domains_page.append(
+            _status_row(
+                "Cloudflare (recommended)",
+                cf["found"],
+                cf_detail,
+                icon_file="cloudflare.svg",
+            )
+        )
+
+        if ng["found"]:
+            ng_detail = (
+                "Found · authtoken configured"
+                if ng["has_authtoken"]
+                else "Found · run: ngrok config add-authtoken <token>"
+            )
+        else:
+            ng_detail = "Not found — install with: yay -S ngrok (optional)"
+        domains_page.append(
+            _status_row(
+                "ngrok (optional)",
+                ng["found"] and ng["has_authtoken"],
+                ng_detail,
+                icon_file="ngrok.svg",
+            )
+        )
+
+        hint = Gtk.Label(
+            label="Cloudflare quick tunnels need no domain. Named hostnames require "
+            "DNS + cloudflared config. ngrok free tier: 20k req / 1GB / month.",
+            xalign=0,
+        )
+        hint.add_css_class("caption")
+        hint.add_css_class("dim-label")
+        hint.set_wrap(True)
+        domains_page.append(hint)
+
+        # Domain list
+        list_label = Gtk.Label(label="Configured domains", xalign=0)
+        list_label.add_css_class("heading")
+        domains_page.append(list_label)
+
+        domain_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        domains_page.append(domain_list_box)
+
+        empty_domains = Gtk.Label(
+            label="No domains yet. Add a named hostname or use Quick tunnel from a project.",
+            xalign=0,
+        )
+        empty_domains.add_css_class("dim-label")
+        empty_domains.add_css_class("caption")
+        empty_domains.set_wrap(True)
+
+        def refresh_domain_list():
+            while True:
+                child = domain_list_box.get_first_child()
+                if child is None:
+                    break
+                domain_list_box.remove(child)
+
+            domains = settings.list_domains()
+            if not domains:
+                domain_list_box.append(empty_domains)
+                return
+
+            for d in domains:
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                provider = d.get("provider", "cloudflare")
+                icon_name = (
+                    "cloudflare.svg"
+                    if provider == "cloudflare"
+                    else "ngrok.svg"
+                    if provider == "ngrok"
+                    else None
+                )
+                if icon_name:
+                    icon = _provider_icon(icon_name)
+                    icon.set_valign(Gtk.Align.CENTER)
+                    row.append(icon)
+                info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+                info.set_hexpand(True)
+                host_lbl = Gtk.Label(label=d.get("hostname", ""), xalign=0)
+                host_lbl.add_css_class("heading")
+                info.append(host_lbl)
+                meta = Gtk.Label(
+                    label=f"{provider} · {d.get('mode', '?')}",
+                    xalign=0,
+                )
+                meta.add_css_class("caption")
+                meta.add_css_class("dim-label")
+                info.append(meta)
+                row.append(info)
+
+                rm_btn = Gtk.Button()
+                rm_btn.set_icon_name("user-trash-symbolic")
+                rm_btn.add_css_class("flat")
+                rm_btn.add_css_class("destructive-action")
+
+                def on_remove(b, domain_id=d.get("id")):
+                    if settings.domain_in_use(domain_id):
+                        toast = Adw.Toast(
+                            title="Domain is used by a project — unassign first"
+                        )
+                        self._toast_overlay.add_toast(toast)
+                        return
+                    settings.remove_domain(domain_id)
+                    refresh_domain_list()
+
+                rm_btn.connect("clicked", on_remove)
+                row.append(rm_btn)
+                domain_list_box.append(row)
+
+        refresh_domain_list()
+
+        # Add domain
+        add_label = Gtk.Label(label="Add domain", xalign=0)
+        add_label.add_css_class("heading")
+        domains_page.append(add_label)
+
+        provider_combo = Gtk.ComboBoxText()
+        provider_combo.append("cloudflare", "Cloudflare named")
+        provider_combo.append("ngrok", "ngrok")
+        provider_combo.set_active_id("cloudflare")
 
         host_entry = Gtk.Entry()
-        host_entry.set_text(s["tunnel_hostname"])
+        host_entry.set_placeholder_text("mcp.example.com")
         host_entry.set_hexpand(True)
 
-        host_save_btn = Gtk.Button(label="Save")
-        host_save_btn.add_css_class("suggested-action")
-        host_save_btn.set_visible(False)
-        host_save_btn.set_valign(Gtk.Align.CENTER)
+        add_btn = Gtk.Button(label="Add")
+        add_btn.add_css_class("suggested-action")
+        add_btn.set_valign(Gtk.Align.CENTER)
 
-        def on_host_changed(entry):
-            changed = entry.get_text().strip() != s["tunnel_hostname"]
-            host_save_btn.set_visible(changed)
+        def on_add_domain(b):
+            host = host_entry.get_text().strip()
+            if not host:
+                return
+            provider = provider_combo.get_active_id() or "cloudflare"
+            mode = "named" if provider == "cloudflare" else "dev"
+            try:
+                settings.add_domain(host, provider=provider, mode=mode)
+            except ValueError as e:
+                toast = Adw.Toast(title=str(e))
+                self._toast_overlay.add_toast(toast)
+                return
+            host_entry.set_text("")
+            refresh_domain_list()
 
-        host_entry.connect("changed", on_host_changed)
+        add_btn.connect("clicked", on_add_domain)
 
-        def on_host_save(b):
-            settings.set("tunnel_hostname", host_entry.get_text().strip())
-            s["tunnel_hostname"] = host_entry.get_text().strip()
-            host_save_btn.set_visible(False)
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        add_row.append(provider_combo)
+        add_row.append(host_entry)
+        add_row.append(add_btn)
+        domains_page.append(add_row)
 
-        host_save_btn.connect("clicked", on_host_save)
-
-        host_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        host_row.append(host_entry)
-        host_row.append(host_save_btn)
-        domains_page.append(host_row)
-
+        # Default MCP port
         port_label = Gtk.Label(label="Default MCP Port", xalign=0)
         port_label.add_css_class("caption")
         port_label.add_css_class("dim-label")
@@ -438,8 +686,9 @@ class MaltApp(Adw.Application):
         port_row.append(port_save_btn)
         domains_page.append(port_row)
 
-        stack.add_titled(domains_page, "domains", "Domains")
-        stack.get_page(domains_page).set_icon_name("network-workgroup-symbolic")
+        domains_scroll.set_child(domains_page)
+        stack.add_titled(domains_scroll, "domains", "Domains")
+        stack.get_page(domains_scroll).set_icon_name("network-workgroup-symbolic")
 
         # ── About tab ──
         about_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -449,7 +698,9 @@ class MaltApp(Adw.Application):
         about_page.set_margin_end(24)
         about_page.set_valign(Gtk.Align.START)
 
-        icon_path = os.path.join(os.path.dirname(__file__), "..", "assets", "malt-rounded.png")
+        icon_path = os.path.join(
+            os.path.dirname(__file__), "..", "assets", "malt-rounded.png"
+        )
         if os.path.exists(icon_path):
             icon = Gtk.Picture.new_for_filename(icon_path)
             icon.set_size_request(48, 48)

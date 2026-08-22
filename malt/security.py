@@ -3,10 +3,44 @@
 import os
 
 PERMISSION_LEVELS = {
-    "read": ["list_directory", "read_file"],
-    "write": ["list_directory", "read_file", "write_file"],
-    "execute": ["list_directory", "read_file", "write_file", "run_command"],
-    "admin": ["list_directory", "read_file", "write_file", "run_command"],
+    "read": [
+        "list_directory",
+        "read_file",
+        "file_info",
+        "search",
+    ],
+    "write": [
+        "list_directory",
+        "read_file",
+        "file_info",
+        "search",
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "move_file",
+    ],
+    "execute": [
+        "list_directory",
+        "read_file",
+        "file_info",
+        "search",
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "move_file",
+        "run_command",
+    ],
+    "admin": [
+        "list_directory",
+        "read_file",
+        "file_info",
+        "search",
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "move_file",
+        "run_command",
+    ],
 }
 
 ALLOWED_CMDS = {

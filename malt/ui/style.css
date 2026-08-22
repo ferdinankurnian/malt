@@ -1,7 +1,6 @@
 /* Flat sidebar background */
 .sidebar {
     background: #2E2E32;
-    border-right: 1px solid alpha(@borders, 0.5);
 }
 
 /* Project card items */
@@ -25,4 +24,76 @@
 /* Active indicator dot */
 .success {
     color: #26a269;
+}
+
+/* ── Project detail layout ─────────────────────────────────────────── */
+
+.detail-meta {
+    background: alpha(@borders, 0.06);
+    border-left: 1px solid alpha(@borders, 0.55);
+    min-width: 280px;
+    max-width: 280px;
+}
+
+.meta-value {
+    font-weight: 500;
+}
+
+.permission-badge {
+    font-family: monospace;
+    font-size: 0.95em;
+}
+
+.endpoint-url {
+    font-size: 0.95em;
+}
+
+.connect-card {
+    border-radius: 12px;
+    background: alpha(@borders, 0.12);
+    padding: 0;
+}
+
+.connect-card:hover {
+    background: alpha(@borders, 0.22);
+}
+
+.connect-guide-text {
+    line-height: 1.45;
+}
+
+.logs-scroll {
+    border-radius: 8px;
+    background: alpha(@borders, 0.08);
+    min-height: 180px;
+}
+
+.project-detail-icon {
+    opacity: 0.95;
+}
+
+.activity-list {
+    background: transparent;
+}
+
+.activity-list row {
+    border-radius: 6px;
+    margin: 1px 4px;
+}
+
+.activity-list row:hover {
+    background: alpha(@borders, 0.15);
+}
+
+.error {
+    color: #e01b24;
+}
+
+.detail-field-frame {
+    border-radius: 8px;
+    background: alpha(@borders, 0.12);
+}
+
+.detail-field-body {
+    background: transparent;
 }

@@ -57,12 +57,26 @@ malt
 
 ### Permissions
 
-| Level     | Tools                                                             |
-|-----------|-------------------------------------------------------------------|
-| `read`    | list_directory, read_file                                         |
-| `write`   | list_directory, read_file, write_file                             |
-| `execute` | list_directory, read_file, write_file, run_command (whitelisted)  |
-| `admin`   | list_directory, read_file, write_file, run_command (any command)  |
+| Level     | Tools |
+|-----------|-------|
+| `read`    | list_directory, read_file, file_info, search |
+| `write`   | list_directory, read_file, file_info, search, write_file, edit_file, delete_file, move_file |
+| `execute` | everything in write + run_command (whitelisted) |
+| `admin`   | everything in write + run_command (any command) |
+
+### Tool details
+
+| Tool | Description |
+|------|-------------|
+| `list_directory` | List folder contents |
+| `read_file` | Read file (supports `start_line` / `end_line` for partial reads) |
+| `file_info` | Size, type, mtime, mode |
+| `search` | Regex search across files with context |
+| `write_file` | Full overwrite |
+| `edit_file` | Exact string search-replace (`replace_all` optional) |
+| `delete_file` | Delete a file |
+| `move_file` | Move / rename within project |
+| `run_command` | Run command (whitelist or free depending on level) |
 
 ## Project Structure
 

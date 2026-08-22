@@ -16,6 +16,9 @@ class Project:
         token: str = "",
         mcp_port: int = 3100,
         tunnel_enabled: bool = False,
+        domain_id: str | None = None,
+        icon_mode: str = "auto",
+        icon_path: str | None = None,
     ):
         self.id = project_id
         self.name = name
@@ -25,6 +28,9 @@ class Project:
         self.token = token
         self.mcp_port = mcp_port
         self.tunnel_enabled = tunnel_enabled
+        self.domain_id = domain_id
+        self.icon_mode = icon_mode or "auto"
+        self.icon_path = icon_path
 
     @classmethod
     def from_db_row(cls, row: dict) -> "Project":
@@ -40,4 +46,7 @@ class Project:
             token=row["token"],
             mcp_port=row.get("mcp_port", 3100),
             tunnel_enabled=bool(row.get("tunnel_enabled", 0)),
+            domain_id=row.get("domain_id"),
+            icon_mode=row.get("icon_mode") or "auto",
+            icon_path=row.get("icon_path"),
         )

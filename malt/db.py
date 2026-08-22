@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS projects (
     token TEXT NOT NULL UNIQUE,
     mcp_port INTEGER DEFAULT 3100,
     tunnel_enabled INTEGER DEFAULT 0,
+    domain_id TEXT,
+    icon_mode TEXT DEFAULT 'auto',
+    icon_path TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -43,9 +46,26 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+    }
+    if "domain_id" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN domain_id TEXT")
+    if "icon_mode" not in cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN icon_mode TEXT DEFAULT 'auto'"
+        )
+    if "icon_path" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN icon_path TEXT")
+
+
 def init_db() -> None:
     conn = _connect()
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.commit()
     conn.close()
 
 
@@ -92,12 +112,16 @@ def update_project(project_id: str, **fields) -> dict | None:
         "allowed_commands",
         "mcp_port",
         "tunnel_enabled",
+        "domain_id",
+        "icon_mode",
+        "icon_path",
     }
     filtered = {k: v for k, v in fields.items() if k in allowed}
     if not filtered:
         return get_project(project_id)
-    filtered["updated_at"] = "CURRENT_TIMESTAMP"
+    # updated_at via SQL expression
     sets = ", ".join(f"{k} = ?" for k in filtered)
+    sets += ", updated_at = CURRENT_TIMESTAMP"
     values = list(filtered.values()) + [project_id]
     conn = _connect()
     conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", values)
@@ -135,10 +159,15 @@ def add_log(
     response: str = "",
     success: bool = True,
 ) -> None:
+    # ISO-8601 with offset so UI can show correct local time
+    from datetime import datetime
+
+    local_ts = datetime.now().astimezone().isoformat(timespec="seconds")
     conn = _connect()
     conn.execute(
-        "INSERT INTO logs (project_id, tool_name, arguments, response, success) VALUES (?, ?, ?, ?, ?)",
-        (project_id, tool_name, arguments, response, int(success)),
+        "INSERT INTO logs (project_id, tool_name, arguments, response, success, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, tool_name, arguments, response, int(success), local_ts),
     )
     conn.commit()
     conn.close()

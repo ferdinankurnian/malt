@@ -44,6 +44,20 @@ No tests exist. No CI.
 - `malt/views/project_detail.py` — right panel: config, server controls, logs
 - `malt/ui/style.css` — custom GTK CSS
 
+## MCP tools (permission-gated)
+
+| Tool | Levels | Notes |
+|------|--------|-------|
+| list_directory | all | |
+| read_file | all | supports `start_line` / `end_line` partial reads |
+| file_info | all | size, type, mtime, mode |
+| search | all | regex + context |
+| write_file | write+ | full overwrite |
+| edit_file | write+ | exact string replace, optional `replace_all` |
+| delete_file | write+ | files only |
+| move_file | write+ | rename/move within root |
+| run_command | execute+ | whitelist (execute) or free (admin) |
+
 ## Key patterns
 
 - Each project gets a unique auth token, regenerable from the UI
