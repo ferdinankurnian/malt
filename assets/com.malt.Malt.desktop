@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=malt
+Comment=Manage multiple project MCP servers from one dashboard
+Exec=malt
+Icon=com.malt.Malt
+StartupWMClass=com.malt.Malt
+Terminal=false
+Categories=Development;
