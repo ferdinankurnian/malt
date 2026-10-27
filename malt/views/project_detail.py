@@ -5,15 +5,47 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shlex
 
 from gi.repository import Adw, Gdk, GLib, Gtk, Pango
 
 from .. import db, icons, settings
-from ..security import PERMISSION_LEVELS
+from ..security import (
+    FILE_CAPABILITIES,
+    TERMINAL_PERMISSIONS,
+    command_rules,
+    legacy_permission,
+    policy_label,
+    project_policy,
+)
 
-_PERMS = ("read", "write", "execute", "admin")
+_FILE_CAPABILITY_LABELS = {
+    "read": "Read files and directories",
+    "write": "Write & edit files",
+    "create": "Create files and directories",
+    "delete": "Delete files and directories",
+}
+_TERMINAL_LABELS = {
+    "off": "Disabled",
+    "allowlist": "Allowed commands only",
+    "full": "Full terminal",
+}
+_PROFILES = {
+    "read only": ({"read"}, "off"),
+    "read & write": ({"read", "write"}, "off"),
+    "developer": ({"read", "write"}, "allowlist"),
+    "god mode": (set(FILE_CAPABILITIES), "full"),
+}
 _META_WIDTH = 280
 _NARROW_BREAKPOINT = 720
+
+
+def _prevent_scroll_value_change(widget: Gtk.Widget) -> None:
+    """Keep a wheel over a combo from changing its value accidentally."""
+    controller = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
+    controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    controller.connect("scroll", lambda *_args: True)
+    widget.add_controller(controller)
 
 _TOOL_ICONS = {
     "read_file": "text-x-generic-symbolic",
@@ -42,6 +74,7 @@ class ProjectDetail(Gtk.Box):
         self._endpoint_url = ""
         self._on_status_change = None
         self._on_deleted = None
+        self._on_project_changed = None
         self._log_poll_id = None
         self._last_log_id = 0
         self._narrow = False
@@ -114,25 +147,31 @@ class ProjectDetail(Gtk.Box):
 
         popover = Gtk.Popover()
         popover.set_has_arrow(False)
+        popover.set_position(Gtk.PositionType.LEFT)
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         menu_box.set_margin_start(4)
         menu_box.set_margin_end(4)
         menu_box.set_margin_top(4)
         menu_box.set_margin_bottom(4)
 
-        settings_btn = Gtk.Button(label="Project settings…")
-        settings_btn.add_css_class("flat")
-        settings_btn.set_halign(Gtk.Align.FILL)
+        def menu_item(label: str) -> Gtk.Button:
+            button = Gtk.Button()
+            button.add_css_class("flat")
+            button.set_halign(Gtk.Align.FILL)
+            text = Gtk.Label(label=label, xalign=0)
+            text.set_hexpand(True)
+            button.set_child(text)
+            return button
+
+        settings_btn = menu_item("Project settings…")
         settings_btn.connect("clicked", self._on_edit_clicked)
         menu_box.append(settings_btn)
 
-        edit_icon_btn = Gtk.Button(label="Change icon…")
-        edit_icon_btn.add_css_class("flat")
-        edit_icon_btn.set_halign(Gtk.Align.FILL)
+        edit_icon_btn = menu_item("Change icon…")
         edit_icon_btn.connect("clicked", self._on_change_icon_menu)
         menu_box.append(edit_icon_btn)
 
-        self._delete_btn = Gtk.Button(label="Delete project")
+        self._delete_btn = menu_item("Delete project")
         self._delete_btn.add_css_class("destructive-action")
         self._delete_btn.add_css_class("flat")
         self._delete_btn.set_halign(Gtk.Align.FILL)
@@ -334,7 +373,7 @@ class ProjectDetail(Gtk.Box):
         perm_group = self._meta_group(meta_inner, top_margin=18)
         perm_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         perm_hdr.set_hexpand(True)
-        perm_cap = Gtk.Label(label="Permission", xalign=0)
+        perm_cap = Gtk.Label(label="Access", xalign=0)
         perm_cap.add_css_class("caption")
         perm_cap.add_css_class("dim-label")
         perm_cap.set_hexpand(True)
@@ -344,7 +383,7 @@ class ProjectDetail(Gtk.Box):
         self._perm_info_btn.add_css_class("flat")
         self._perm_info_btn.set_size_request(32, 32)
         self._perm_info_btn.set_halign(Gtk.Align.END)
-        self._perm_info_btn.set_tooltip_text("Tools available for this permission")
+        self._perm_info_btn.set_tooltip_text("Capabilities available to this project")
         self._perm_info_btn.connect("clicked", self._on_perm_info)
         perm_hdr.append(self._perm_info_btn)
         perm_group.append(perm_hdr)
@@ -479,6 +518,10 @@ class ProjectDetail(Gtk.Box):
         """Callback(project_id) so sidebar can refresh the card icon."""
         self._on_icon_changed = callback
 
+    def on_project_changed(self, callback):
+        """Callback(project_id) after editable project metadata changes."""
+        self._on_project_changed = callback
+
     def set_project(self, project: dict | None):
         self._project = project
         if project is None:
@@ -535,8 +578,7 @@ class ProjectDetail(Gtk.Box):
         self._meta_path_value.set_label(path or "—")
         self._meta_path_value.set_tooltip_text(path)
 
-        perm = self._project.get("permission") or "read"
-        self._meta_perm_value.set_label(perm)
+        self._meta_perm_value.set_label(policy_label(self._project))
 
         self._meta_domain_value.set_label(self._domain_display())
 
@@ -572,22 +614,10 @@ class ProjectDetail(Gtk.Box):
 
     # ── Permission info ─────────────────────────────────────────────────
 
-    def _perm_description(self, perm: str) -> str:
-        tools = PERMISSION_LEVELS.get(perm, [])
-        if perm == "admin":
-            return f"Tools: {', '.join(tools)} + run any command"
-        if perm == "execute":
-            return (
-                f"Tools: {', '.join(tools)} "
-                "(run_command limited to allowed commands whitelist)"
-            )
-        return f"Tools: {', '.join(tools)}" if tools else ""
-
     def _on_perm_info(self, _button):
         if not self._project:
             return
-        perm = self._project.get("permission") or "read"
-        tools = PERMISSION_LEVELS.get(perm, [])
+        files, terminal = project_policy(self._project)
 
         pop = Gtk.Popover()
         pop.set_has_arrow(True)
@@ -597,24 +627,33 @@ class ProjectDetail(Gtk.Box):
         box.set_margin_top(10)
         box.set_margin_bottom(10)
 
-        title = Gtk.Label(label=f"Permission: {perm}", xalign=0)
+        title = Gtk.Label(label=f"Access: {policy_label(self._project)}", xalign=0)
         title.add_css_class("heading")
         box.append(title)
 
-        for t in tools:
-            row = Gtk.Label(label=f"• {t}", xalign=0)
+        for capability in FILE_CAPABILITIES:
+            marker = "✓" if capability in files else "—"
+            row = Gtk.Label(
+                label=f"{marker} {_FILE_CAPABILITY_LABELS[capability]}", xalign=0
+            )
             row.add_css_class("caption")
             box.append(row)
+
+        terminal_row = Gtk.Label(
+            label=f"Terminal: {_TERMINAL_LABELS.get(terminal, terminal)}", xalign=0
+        )
+        terminal_row.add_css_class("caption")
+        box.append(terminal_row)
 
         note = Gtk.Label(xalign=0)
         note.add_css_class("caption")
         note.add_css_class("dim-label")
         note.set_wrap(True)
         note.set_max_width_chars(36)
-        if perm == "execute":
-            note.set_label("run_command is limited to the allowed commands whitelist.")
-        elif perm == "admin":
-            note.set_label("run_command may execute any command.")
+        if terminal == "allowlist":
+            note.set_label("Only configured command rules may run.")
+        elif terminal == "full":
+            note.set_label("run_command may execute any command from the project root.")
         else:
             note.set_label("No command execution at this level.")
         box.append(note)
@@ -634,8 +673,8 @@ class ProjectDetail(Gtk.Box):
     def _open_edit_modal(self):
         dialog = Adw.Dialog()
         dialog.set_title("Project settings")
-        dialog.set_content_width(500)
-        dialog.set_content_height(560)
+        dialog.set_content_width(560)
+        dialog.set_content_height(700)
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -643,7 +682,7 @@ class ProjectDetail(Gtk.Box):
         header.set_title_widget(Gtk.Label(label="Project settings"))
         toolbar.add_top_bar(header)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         outer.set_margin_start(20)
         outer.set_margin_end(20)
         outer.set_margin_top(16)
@@ -657,6 +696,17 @@ class ProjectDetail(Gtk.Box):
         intro.set_wrap(True)
         outer.append(intro)
 
+        # Project name
+        name_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        name_lbl = Gtk.Label(label="Project name", xalign=0)
+        name_lbl.add_css_class("heading")
+        name_section.append(name_lbl)
+        name_entry = Gtk.Entry()
+        name_entry.set_text(self._project.get("name") or "")
+        name_entry.set_hexpand(True)
+        name_section.append(name_entry)
+        outer.append(name_section)
+
         # Path
         path_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         path_lbl = Gtk.Label(label="Root path", xalign=0)
@@ -666,28 +716,502 @@ class ProjectDetail(Gtk.Box):
         path_entry.set_text(self._project.get("root_path") or "")
         path_entry.set_placeholder_text("/path/to/project")
         path_entry.set_hexpand(True)
-        path_section.append(path_entry)
+        browse_btn = Gtk.Button(label="Browse…")
+        browse_btn.set_tooltip_text("Choose a project folder")
+        path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        path_row.append(path_entry)
+        path_row.append(browse_btn)
+        path_section.append(path_row)
         outer.append(path_section)
 
-        # Permission
-        permission_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        perm_lbl = Gtk.Label(label="Permission", xalign=0)
-        perm_lbl.add_css_class("heading")
-        permission_section.append(perm_lbl)
-        perm_combo = Gtk.ComboBoxText()
-        for p in _PERMS:
-            perm_combo.append_text(p)
-        cur = self._project.get("permission") or "read"
-        perm_combo.set_active(_PERMS.index(cur) if cur in _PERMS else 0)
-        permission_section.append(perm_combo)
+        def on_browse(_button):
+            def on_picked(file_dialog, result):
+                try:
+                    folder = file_dialog.select_folder_finish(result)
+                    selected_path = folder.get_path()
+                    if selected_path:
+                        path_entry.set_text(selected_path)
+                except Exception:
+                    pass
 
-        perm_desc = Gtk.Label(xalign=0)
-        perm_desc.add_css_class("caption")
-        perm_desc.add_css_class("dim-label")
-        perm_desc.set_wrap(True)
-        perm_desc.set_label(self._perm_description(cur))
-        permission_section.append(perm_desc)
-        outer.append(permission_section)
+            folder_dialog = Gtk.FileDialog()
+            folder_dialog.set_title("Choose project folder")
+            folder_dialog.select_folder(self.get_root(), None, on_picked)
+
+        browse_btn.connect("clicked", on_browse)
+
+        files, terminal = project_policy(self._project)
+        rules: list[dict] = command_rules(self._project)
+
+        def add_help(parent, tooltip: str):
+            button = Gtk.Button(label="?")
+            button.add_css_class("flat")
+            button.add_css_class("dim-label")
+            button.set_size_request(32, 32)
+            button.set_tooltip_text(tooltip)
+            parent.append(button)
+
+        def section_header(title: str, tooltip: str):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            label = Gtk.Label(label=title, xalign=0)
+            label.add_css_class("heading")
+            label.set_hexpand(True)
+            row.append(label)
+            add_help(row, tooltip)
+            return row
+
+        # Icon controls stay inline so the complete project metadata editor is
+        # visible in one place.
+        icon_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        icon_section.append(
+            section_header(
+                "Project icon", "Upload an image for this project or remove the uploaded icon."
+            )
+        )
+        icon_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        icon_preview = Gtk.Image()
+        icon_preview.set_pixel_size(32)
+        icons.apply_to_image(
+            icon_preview,
+            name=self._project.get("name") or "",
+            project_id=self._project.get("id") or "",
+            root_path=self._project.get("root_path") or "",
+            icon_mode=self._project.get("icon_mode") or "auto",
+            icon_path=self._project.get("icon_path"),
+            size=32,
+        )
+        icon_row.append(icon_preview)
+        current_icon_mode = self._project.get("icon_mode") or "none"
+        icon_mode_label = Gtk.Label(
+            label="Uploaded image" if current_icon_mode == "custom" else "None",
+            xalign=0,
+        )
+        icon_mode_label.set_hexpand(True)
+        icon_row.append(icon_mode_label)
+
+        def refresh_icon_preview(mode: str, icon_path: str | None = None):
+            icon_mode_label.set_label("Uploaded image" if mode == "custom" else "None")
+            icons.apply_to_image(
+                icon_preview,
+                name=name_entry.get_text().strip(),
+                project_id=self._project.get("id") or "",
+                root_path=path_entry.get_text().strip(),
+                icon_mode=mode,
+                icon_path=icon_path,
+                size=32,
+            )
+
+        def set_inline_icon(mode: str, icon_path: str | None = None):
+            if mode != "custom":
+                icons.delete_custom_icons(self._project["id"])
+                icon_path = None
+            db.update_project(
+                self._project["id"], icon_mode=mode, icon_path=icon_path
+            )
+            self._project["icon_mode"] = mode
+            self._project["icon_path"] = icon_path
+            remove_icon_btn.set_visible(mode == "custom")
+            refresh_icon_preview(mode, icon_path)
+            if self._on_icon_changed:
+                self._on_icon_changed(self._project["id"])
+
+        upload_icon_btn = Gtk.Button(label="Upload image…")
+        upload_icon_btn.set_tooltip_text("Use an image file as the project icon")
+
+        def on_upload_icon(_button):
+            def on_picked(file_dialog, result):
+                try:
+                    image_file = file_dialog.open_finish(result)
+                    source_path = image_file.get_path()
+                    if source_path:
+                        relative_path = icons.save_custom_icon(
+                            self._project["id"], source_path
+                        )
+                        set_inline_icon("custom", relative_path)
+                except Exception:
+                    pass
+
+            from gi.repository import Gio
+
+            file_dialog = Gtk.FileDialog()
+            file_dialog.set_title("Choose project icon")
+            image_filter = Gtk.FileFilter()
+            image_filter.set_name("Images")
+            for pattern in ("*.png", "*.svg", "*.ico", "*.webp", "*.jpg", "*.jpeg"):
+                image_filter.add_pattern(pattern)
+            filter_list = Gio.ListStore.new(Gtk.FileFilter)
+            filter_list.append(image_filter)
+            file_dialog.set_filters(filter_list)
+            file_dialog.set_default_filter(image_filter)
+            file_dialog.open(self.get_root(), None, on_picked)
+
+        upload_icon_btn.connect("clicked", on_upload_icon)
+        icon_row.append(upload_icon_btn)
+
+        remove_icon_btn = Gtk.Button(label="Remove icon")
+        remove_icon_btn.add_css_class("destructive-action")
+        remove_icon_btn.set_tooltip_text("Remove the uploaded icon and use the project letter")
+        remove_icon_btn.set_visible((self._project.get("icon_mode") or "") == "custom")
+
+        def remove_icon(_button):
+            set_inline_icon("none")
+
+        remove_icon_btn.connect("clicked", remove_icon)
+        icon_row.append(remove_icon_btn)
+        icon_section.append(icon_row)
+        outer.append(icon_section)
+
+        # Access profiles are shortcuts; the capability rows below are the
+        # actual editable policy.
+        profile_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        profile_section.append(
+            section_header(
+                "Access profile",
+                "Profiles are shortcuts. The capability rows below show exactly what is allowed.",
+            )
+        )
+        profile_desc = Gtk.Label(xalign=0)
+        profile_desc.add_css_class("caption")
+        profile_desc.add_css_class("dim-label")
+        profile_desc.set_wrap(True)
+        profile_section.append(profile_desc)
+
+        profile_buttons: dict[str, Gtk.ToggleButton] = {}
+        profile_rows = [
+            ("read only", "Read only"),
+            ("read & write", "Read & write"),
+            ("developer", "Developer"),
+            ("god mode", "⚠ God mode"),
+        ]
+        profile_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        for offset in (0, 2):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            for key, label in profile_rows[offset : offset + 2]:
+                button = Gtk.ToggleButton(label=label)
+                button.set_hexpand(True)
+                if key == "god mode":
+                    button.add_css_class("destructive-action")
+                profile_buttons[key] = button
+                row.append(button)
+            profile_box.append(row)
+        profile_section.append(profile_box)
+        outer.append(profile_section)
+
+        capability_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        capability_title = Gtk.Label(label="File capabilities", xalign=0)
+        capability_title.add_css_class("heading")
+        capability_section.append(capability_title)
+        capability_hint = Gtk.Label(
+            label="Each capability is independent. Delete and move are not included in write access.",
+            xalign=0,
+        )
+        capability_hint.add_css_class("caption")
+        capability_hint.add_css_class("dim-label")
+        capability_hint.set_wrap(True)
+        capability_section.append(capability_hint)
+        capability_list = Gtk.ListBox()
+        capability_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        capability_list.add_css_class("boxed-list")
+        capability_checks: dict[str, Gtk.CheckButton] = {}
+        for capability in FILE_CAPABILITIES:
+            check = Gtk.CheckButton(label=_FILE_CAPABILITY_LABELS[capability])
+            check.set_active(capability in files)
+            capability_checks[capability] = check
+            capability_list.append(check)
+        capability_section.append(capability_list)
+        outer.append(capability_section)
+
+        terminal_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        terminal_section.append(
+            section_header(
+                "Terminal access",
+                "Disabled exposes no terminal tool. Allowed commands uses the rules below; full terminal accepts any command.",
+            )
+        )
+        terminal_combo = Gtk.ComboBoxText()
+        for mode in TERMINAL_PERMISSIONS:
+            terminal_combo.append_text(_TERMINAL_LABELS[mode])
+        terminal_combo.set_active(TERMINAL_PERMISSIONS.index(terminal))
+        _prevent_scroll_value_change(terminal_combo)
+        terminal_section.append(terminal_combo)
+        terminal_desc = Gtk.Label(xalign=0)
+        terminal_desc.add_css_class("caption")
+        terminal_desc.add_css_class("dim-label")
+        terminal_desc.set_wrap(True)
+        terminal_section.append(terminal_desc)
+        outer.append(terminal_section)
+
+        command_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        command_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        command_label = Gtk.Label(label="Allowed commands", xalign=0)
+        command_label.add_css_class("heading")
+        command_label.set_hexpand(True)
+        command_header.append(command_label)
+        add_help(
+            command_header,
+            "Exact command: only `bun run build`. Command prefix: allows extra arguments after `bun run`. Binary unrestricted: allows any bun command. Rules run without a shell.",
+        )
+        command_section.append(command_header)
+        command_hint = Gtk.Label(
+            label="Add command rules below. Exact command is the safest default.",
+            xalign=0,
+        )
+        command_hint.add_css_class("caption")
+        command_hint.add_css_class("dim-label")
+        command_hint.set_wrap(True)
+        command_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        command_body.append(command_hint)
+
+        cmd_list = Gtk.ListBox()
+        cmd_list.set_selection_mode(Gtk.SelectionMode.NONE)
+        cmd_list.add_css_class("boxed-list")
+        command_body.append(cmd_list)
+
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        cmd_entry = Gtk.Entry()
+        cmd_entry.set_hexpand(True)
+        cmd_entry.set_placeholder_text("e.g. bun run build")
+        cmd_entry.add_css_class("monospace")
+        add_row.append(cmd_entry)
+        scope_combo = Gtk.ComboBoxText()
+        for scope in ("exact", "prefix", "binary"):
+            scope_combo.append_text(scope.title() + (" command" if scope != "binary" else " unrestricted"))
+        scope_combo.set_active(0)
+        _prevent_scroll_value_change(scope_combo)
+        add_row.append(scope_combo)
+        add_cmd_btn = Gtk.Button(label="Add")
+        add_cmd_btn.add_css_class("suggested-action")
+        add_row.append(add_cmd_btn)
+        command_body.append(add_row)
+
+        cmd_error = Gtk.Label(xalign=0)
+        cmd_error.add_css_class("caption")
+        cmd_error.add_css_class("error")
+        cmd_error.set_wrap(True)
+        command_body.append(cmd_error)
+        command_section.append(command_body)
+
+        def rebuild_cmd_list():
+            while True:
+                row = cmd_list.get_row_at_index(0)
+                if row is None:
+                    break
+                cmd_list.remove(row)
+            for rule in rules:
+                row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                text = Gtk.Label(label=rule["command"], xalign=0)
+                text.set_hexpand(True)
+                text.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                text.add_css_class("monospace")
+                row_box.append(text)
+                scope_label = Gtk.Label(label=rule["scope"])
+                scope_label.add_css_class("caption")
+                scope_label.add_css_class("dim-label")
+                row_box.append(scope_label)
+                remove = Gtk.Button()
+                remove.set_icon_name("window-close-symbolic")
+                remove.add_css_class("flat")
+                remove.set_tooltip_text("Remove command rule")
+
+                def _remove(_button, target=rule):
+                    if target in rules:
+                        rules.remove(target)
+                        rebuild_cmd_list()
+                        schedule_save()
+
+                remove.connect("clicked", _remove)
+                row_box.append(remove)
+                cmd_list.append(row_box)
+
+        def add_command(_widget=None):
+            text = cmd_entry.get_text().strip()
+            scope_index = scope_combo.get_active()
+            scope = ("exact", "prefix", "binary")[scope_index]
+            try:
+                argv = shlex.split(text)
+            except ValueError as error:
+                cmd_error.set_label(f"Invalid command syntax: {error}")
+                return
+            if not argv:
+                cmd_error.set_label("Enter a command first.")
+                return
+            if scope == "binary" and len(argv) != 1:
+                cmd_error.set_label("Binary unrestricted expects one binary, e.g. `bun`.")
+                return
+            rule = {"command": text, "scope": scope}
+            if rule in rules:
+                cmd_error.set_label("That command rule is already listed.")
+                return
+            rules.append(rule)
+            cmd_entry.set_text("")
+            cmd_error.set_label("")
+            rebuild_cmd_list()
+            schedule_save()
+
+        add_cmd_btn.connect("clicked", add_command)
+        cmd_entry.connect("activate", add_command)
+        rebuild_cmd_list()
+        outer.append(command_section)
+
+        def terminal_mode() -> str:
+            return TERMINAL_PERMISSIONS[terminal_combo.get_active()]
+
+        save_timeout_id: int | None = None
+
+        def persist_settings():
+            if not self._project:
+                return
+            new_path = path_entry.get_text().strip()
+            new_name = name_entry.get_text().strip()
+            if not new_name or not new_path:
+                return
+
+            new_files = {
+                capability
+                for capability, check in capability_checks.items()
+                if check.get_active()
+            }
+            new_terminal = terminal_mode()
+            new_perm = legacy_permission(new_files, new_terminal)
+            payload_files = json.dumps(sorted(new_files))
+            payload_cmds = json.dumps(rules)
+            changed = (
+                new_name != self._project.get("name")
+                or new_path != self._project.get("root_path")
+                or new_perm != self._project.get("permission")
+                or payload_files != self._project.get("file_permissions")
+                or new_terminal != self._project.get("terminal_permission")
+                or payload_cmds != self._project.get("allowed_commands")
+            )
+            if not changed:
+                return
+
+            db.update_project(
+                self._project["id"],
+                name=new_name,
+                root_path=new_path,
+                permission=new_perm,
+                allowed_commands=payload_cmds,
+                file_permissions=payload_files,
+                terminal_permission=new_terminal,
+            )
+            self._project["name"] = new_name
+            self._project["root_path"] = new_path
+            self._project["permission"] = new_perm
+            self._project["allowed_commands"] = payload_cmds
+            self._project["file_permissions"] = payload_files
+            self._project["terminal_permission"] = new_terminal
+
+            if self._server_mgr and self._server_mgr.is_project_running(self._project["id"]):
+                try:
+                    self._server_mgr.stop_project(self._project["id"])
+                    self._server_mgr.start_project(
+                        self._project, settings.get("default_mcp_port")
+                    )
+                except Exception as error:
+                    self._set_server_button(stopped=True)
+                    self.append_log("error", f"Could not restart server: {error}")
+            self._refresh_meta()
+            if self._on_project_changed:
+                self._on_project_changed(self._project["id"])
+
+        def flush_scheduled_save():
+            nonlocal save_timeout_id
+            save_timeout_id = None
+            persist_settings()
+            return False
+
+        def schedule_save(*_args):
+            nonlocal save_timeout_id
+            if save_timeout_id is not None:
+                GLib.source_remove(save_timeout_id)
+            save_timeout_id = GLib.timeout_add(300, flush_scheduled_save)
+
+        def on_dialog_closed(_dialog):
+            nonlocal save_timeout_id
+            if save_timeout_id is not None:
+                GLib.source_remove(save_timeout_id)
+                save_timeout_id = None
+            persist_settings()
+
+        dialog.connect("closed", on_dialog_closed)
+
+        def sync_command_state():
+            mode = terminal_mode()
+            command_body.set_sensitive(mode == "allowlist")
+            if mode == "off":
+                terminal_desc.set_label("No run_command tool is exposed.")
+            elif mode == "allowlist":
+                terminal_desc.set_label(
+                    "Only the command rules below may run. Rules use exact matching by default."
+                )
+            else:
+                terminal_desc.set_label(
+                    "Any command may run from the project root. Use with care."
+                )
+
+        def sync_profile_state():
+            current_files = {
+                capability
+                for capability, check in capability_checks.items()
+                if check.get_active()
+            }
+            current_terminal = terminal_mode()
+            selected = next(
+                (
+                    key
+                    for key, (profile_files, profile_terminal) in _PROFILES.items()
+                    if current_files == profile_files and current_terminal == profile_terminal
+                ),
+                None,
+            )
+            for key, button in profile_buttons.items():
+                button.set_active(key == selected)
+            if selected:
+                profile_desc.set_label(
+                    {
+                        "read only": "Inspect files and search. No changes or terminal access.",
+                        "read & write": "Read and edit existing files without delete, create, or terminal access.",
+                        "developer": "Read and edit existing files, plus explicitly allowed terminal commands.",
+                        "god mode": "All file operations and unrestricted terminal access.",
+                    }[selected]
+                )
+            else:
+                profile_desc.set_label("Custom access policy")
+            sync_command_state()
+
+        applying_profile = False
+
+        def apply_profile(_button, key: str):
+            nonlocal applying_profile
+            if applying_profile or not profile_buttons[key].get_active():
+                return
+            applying_profile = True
+            profile_files, profile_terminal = _PROFILES[key]
+            for capability, check in capability_checks.items():
+                check.set_active(capability in profile_files)
+            terminal_combo.set_active(TERMINAL_PERMISSIONS.index(profile_terminal))
+            applying_profile = False
+            sync_profile_state()
+
+        for key, button in profile_buttons.items():
+            button.connect("toggled", apply_profile, key)
+
+        def on_capability_toggled(_check):
+            sync_profile_state()
+            schedule_save()
+
+        for check in capability_checks.values():
+            check.connect("toggled", on_capability_toggled)
+
+        def on_terminal_changed(_combo):
+            sync_profile_state()
+            schedule_save()
+
+        terminal_combo.connect("changed", on_terminal_changed)
+        name_entry.connect("changed", schedule_save)
+        path_entry.connect("changed", schedule_save)
+        sync_profile_state()
 
         # Domain (read-only note — picker lands with tunnels UI)
         domain_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -707,120 +1231,10 @@ class ProjectDetail(Gtk.Box):
         domain_section.append(domain_hint)
         outer.append(domain_section)
 
-        # Allowed commands (execute only)
-        cmd_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        cmd_lbl = Gtk.Label(label="Allowed commands", xalign=0)
-        cmd_lbl.add_css_class("caption")
-        cmd_lbl.add_css_class("dim-label")
-        cmd_section.append(cmd_lbl)
-
-        cmd_list = Gtk.ListBox()
-        cmd_list.set_selection_mode(Gtk.SelectionMode.NONE)
-        cmd_list.add_css_class("boxed-list")
-        cmd_section.append(cmd_list)
-
-        cmd_entry = Gtk.Entry()
-        cmd_entry.set_placeholder_text("type command then press Enter…")
-        cmd_entry.add_css_class("monospace")
-        cmd_section.append(cmd_entry)
-
-        cmd_hint = Gtk.Label(
-            label='exact match required — e.g. "bun test", "cargo check"',
-            xalign=0,
-        )
-        cmd_hint.add_css_class("caption")
-        cmd_hint.add_css_class("dim-label")
-        cmd_section.append(cmd_hint)
-
-        # Working copy of commands
-        cmds: list[str] = json.loads(
-            self._project.get("allowed_commands", "[]") or "[]"
-        )
-
-        def rebuild_cmd_list():
-            while True:
-                row = cmd_list.get_row_at_index(0)
-                if row is None:
-                    break
-                cmd_list.remove(row)
-            for c in cmds:
-                row_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-                lbl = Gtk.Label(label=c, xalign=0)
-                lbl.set_hexpand(True)
-                lbl.add_css_class("monospace")
-                row_box.append(lbl)
-                rm = Gtk.Button()
-                rm.set_icon_name("window-close-symbolic")
-                rm.add_css_class("flat")
-
-                def _rm(_b, command=c):
-                    if command in cmds:
-                        cmds.remove(command)
-                        rebuild_cmd_list()
-
-                rm.connect("clicked", _rm)
-                row_box.append(rm)
-                cmd_list.append(row_box)
-
-        def on_add_cmd(entry):
-            text = entry.get_text().strip()
-            if not text or text in cmds:
-                entry.set_text("")
-                return
-            cmds.append(text)
-            entry.set_text("")
-            rebuild_cmd_list()
-
-        cmd_entry.connect("activate", on_add_cmd)
-        rebuild_cmd_list()
-
-        def sync_cmd_visibility():
-            p = perm_combo.get_active_text() or "read"
-            cmd_section.set_visible(p == "execute")
-            perm_desc.set_label(self._perm_description(p))
-
-        perm_combo.connect("changed", lambda *_: sync_cmd_visibility())
-        sync_cmd_visibility()
-        outer.append(cmd_section)
-
-        # Buttons
-        btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        btns.set_halign(Gtk.Align.END)
-        btns.set_margin_top(8)
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.connect("clicked", lambda *_: dialog.close())
-        btns.append(cancel_btn)
-
-        save_btn = Gtk.Button(label="Save")
-        save_btn.add_css_class("suggested-action")
-
-        def on_save(_b):
-            if not self._project:
-                dialog.close()
-                return
-            new_path = path_entry.get_text().strip()
-            new_perm = perm_combo.get_active_text() or "read"
-            # Always persist the working command list so edits aren't lost
-            # when switching permission away from and back to execute.
-            payload_cmds = json.dumps(cmds)
-
-            db.update_project(
-                self._project["id"],
-                root_path=new_path,
-                permission=new_perm,
-                allowed_commands=payload_cmds,
-            )
-            self._project["root_path"] = new_path
-            self._project["permission"] = new_perm
-            self._project["allowed_commands"] = payload_cmds
-            self._refresh_meta()
-            dialog.close()
-
-        save_btn.connect("clicked", on_save)
-        btns.append(save_btn)
-        outer.append(btns)
-
-        toolbar.set_content(outer)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_child(outer)
+        toolbar.set_content(scroll)
         dialog.set_child(toolbar)
         self._edit_dialog = dialog
         dialog.present(self.get_root())
@@ -835,7 +1249,10 @@ class ProjectDetail(Gtk.Box):
         pid = self._project["id"]
         token = self._project["token"]
         hostname = self._hostname_for_url()
-        url = f"https://{hostname}/mcp/{pid}?token={token}"
+        # Keep the token in the path so clients that strip query parameters
+        # during endpoint validation (notably ChatGPT connectors) can still
+        # authenticate the capability URL.
+        url = f"https://{hostname}/mcp/{pid}/{token}"
         self._endpoint_url = url
         if self._url_visible:
             self._url_display.set_label(url)
@@ -892,27 +1309,24 @@ class ProjectDetail(Gtk.Box):
         tab_bar.set_margin_end(12)
         outer.append(tab_bar)
 
-        url = self._endpoint_url or ""
-        name = (self._project or {}).get("name") or "project"
-
         providers = [
             (
                 "chatgpt",
                 "ChatGPT",
                 "chatgpt.svg",
-                self._connect_text_chatgpt(name, url),
+                self._connect_text_chatgpt(),
             ),
             (
                 "claude",
                 "Claude",
                 "claude.svg",
-                self._connect_text_claude(name, url),
+                self._connect_text_claude(),
             ),
             (
                 "grok",
                 "Grok",
                 "grok.svg",
-                self._connect_text_grok(name, url),
+                self._connect_text_grok(),
             ),
         ]
 
@@ -946,7 +1360,6 @@ class ProjectDetail(Gtk.Box):
             page.set_margin_bottom(16)
 
             head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            head.append(self._provider_icon(icon_file, 28))
             hlabel = Gtk.Label(label=title_str, xalign=0)
             hlabel.add_css_class("title-2")
             head.append(hlabel)
@@ -985,36 +1398,39 @@ class ProjectDetail(Gtk.Box):
         dialog.present(self.get_root())
 
     @staticmethod
-    def _connect_text_chatgpt(name: str, url: str) -> str:
+    def _connect_text_chatgpt() -> str:
         return (
-            f"Connect “{name}” to ChatGPT via MCP.\n\n"
-            "1. Open ChatGPT settings → Apps / Connectors (or MCP).\n"
-            "2. Add a new remote MCP server.\n"
-            "3. Paste the MCP endpoint URL (use Copy MCP URL below).\n"
-            "4. Keep the token private — anyone with the URL can access this project.\n\n"
-            "Details for ChatGPT’s UI may change; the endpoint URL is what matters."
+            "1. Open https://chatgpt.com\n"
+            "2. Go to Plugins → Add → Add custom MCP server\n"
+            "3. Fill the forms and paste the URL\n"
+            "4. Use Server URL, not Tunnel\n"
+            "5. At Authentication, select No authentication\n"
+            "6. Check the agreement and click Create as a plugin\n"
+            "7. Click Connect Malt\n"
+            "8. Done"
         )
 
     @staticmethod
-    def _connect_text_claude(name: str, url: str) -> str:
+    def _connect_text_claude() -> str:
         return (
-            f"Connect “{name}” to Claude via MCP.\n\n"
-            "1. Open Claude → Settings → Connectors / MCP.\n"
-            "2. Add a custom MCP server with the endpoint URL.\n"
-            "3. Paste the URL (Copy MCP URL below).\n"
-            "4. Allow tools for this project when prompted.\n\n"
-            "Claude Desktop may also accept the same URL in its config file."
+            "1. Open https://claude.ai or Claude Desktop\n"
+            "2. Go to settings page → Connectors → + Add → Add custom connector\n"
+            "3. Fill the name and paste the url\n"
+            "4. Click Continue\n"
+            "5. In Authentication, select No sign-in option, and click Add\n"
+            "6. And click Connect\n"
+            "7. Done"
         )
 
     @staticmethod
-    def _connect_text_grok(name: str, url: str) -> str:
+    def _connect_text_grok() -> str:
         return (
-            f"Connect “{name}” to Grok via MCP.\n\n"
-            "1. In Grok, open connectors / MCP settings.\n"
-            "2. Add a remote MCP endpoint.\n"
-            "3. Paste the URL (Copy MCP URL below).\n"
-            "4. Confirm tools are allowed for this session.\n\n"
-            "Exact menu names can change — the MCP URL is the important part."
+            "1. Open https://grok.com\n"
+            "2. Click + on the composer and go to Connectors → Add connector\n"
+            "3. Select Custom\n"
+            "4. Fill the name and paste the url\n"
+            "5. Click Add Connector\n"
+            "6. Done"
         )
 
     def _on_copy_url(self, _button):
@@ -1076,9 +1492,27 @@ class ProjectDetail(Gtk.Box):
         try:
             port = settings.get("default_mcp_port")
             self._server_mgr.start_project(self._project, port)
-            hostname = self._hostname_for_url()
-            if hostname and hostname != "localhost" and self._tunnel_mgr:
-                self._tunnel_mgr.start(hostname, port)
+            if self._tunnel_mgr:
+                from ..tunnel import DomainConfig
+
+                domain_id = self._project.get("domain_id")
+                d = settings.get_domain(domain_id) if domain_id else None
+                if d and d.get("hostname") and d.get("provider") == "cloudflare":
+                    domains = [
+                        DomainConfig(
+                            id=d.get("id", ""),
+                            hostname=d.get("hostname", ""),
+                            provider="cloudflare",
+                            mode=d.get("mode", "named"),
+                        )
+                    ]
+                    self._tunnel_mgr.start_domains(domains, port)
+                else:
+                    # No named domain assigned: fall back to hostname for URL
+                    # display only; start quick tunnel so AI can still reach it.
+                    hostname = self._hostname_for_url()
+                    if hostname and hostname != "localhost":
+                        self._tunnel_mgr.start(hostname, port)
             self._set_server_button(stopped=False)
             self.append_log("server", f"Started on port {port}")
             if self._on_status_change:
@@ -1344,7 +1778,7 @@ class ProjectDetail(Gtk.Box):
     def _show_activity_detail(self, event: dict):
         dialog = Adw.Dialog()
         dialog.set_title(event["tool"])
-        dialog.set_content_width(480)
+        dialog.set_content_width(760)
         dialog.set_content_height(520)
 
         toolbar = Adw.ToolbarView()
@@ -1355,15 +1789,28 @@ class ProjectDetail(Gtk.Box):
         header.set_title_widget(title)
         toolbar.add_top_bar(header)
 
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_vexpand(True)
+        columns = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        columns.set_position(300)
+        columns.set_wide_handle(True)
+        columns.set_vexpand(True)
 
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        content.set_margin_start(20)
-        content.set_margin_end(20)
-        content.set_margin_top(12)
-        content.set_margin_bottom(20)
+        metadata_scroll = Gtk.ScrolledWindow()
+        metadata_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        metadata_scroll.set_vexpand(True)
+        metadata = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        metadata.set_margin_start(20)
+        metadata.set_margin_end(12)
+        metadata.set_margin_top(12)
+        metadata.set_margin_bottom(20)
+
+        result_scroll = Gtk.ScrolledWindow()
+        result_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        result_scroll.set_vexpand(True)
+        result_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        result_content.set_margin_start(12)
+        result_content.set_margin_end(20)
+        result_content.set_margin_top(12)
+        result_content.set_margin_bottom(20)
 
         # Status + time
         meta = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -1381,22 +1828,49 @@ class ProjectDetail(Gtk.Box):
             )
             ts_lbl.add_css_class("dim-label")
             meta.append(ts_lbl)
-        content.append(meta)
+        metadata.append(meta)
 
         # Argument fields as separate sections
         args = event.get("args") or {}
         if args:
             for key, value in args.items():
-                content.append(self._detail_field(self._human_arg_label(key), value))
+                if key not in {"old_string", "new_string"}:
+                    metadata.append(self._detail_field(self._human_arg_label(key), value))
         elif event.get("raw_args") and event["raw_args"] not in ("", "{}"):
-            content.append(self._detail_field("Arguments", event["raw_args"]))
+            metadata.append(self._detail_field("Arguments", event["raw_args"]))
 
-        # Result
+        # Content-heavy values stay in the right column for comparison.
         result = (event.get("response") or "").strip() or "(no output)"
-        content.append(self._detail_field("Result", result, error=not event["ok"]))
+        result_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        result_title = Gtk.Label(label="Result", xalign=0)
+        result_title.add_css_class("title-3")
+        result_content.append(result_title)
+        result_content.append(self._detail_field("", result, error=not event["ok"]))
+        if "old_string" in args:
+            result_content.append(
+                self._detail_field("Old string", args["old_string"])
+            )
+        if "new_string" in args:
+            result_content.append(
+                self._detail_field("New string", args["new_string"])
+            )
+        result_content.set_vexpand(True)
+        result_scroll.set_child(result_content)
+        metadata_scroll.set_child(metadata)
+        columns.set_start_child(metadata_scroll)
+        columns.set_end_child(result_scroll)
 
-        scroll.set_child(content)
-        toolbar.set_content(scroll)
+        def _responsive_layout(_widget, _pspec):
+            columns.set_orientation(
+                Gtk.Orientation.VERTICAL
+                if columns.get_width() < 680
+                else Gtk.Orientation.HORIZONTAL
+            )
+
+        columns.connect("notify::width", _responsive_layout)
+        _responsive_layout(columns, None)
+
+        toolbar.set_content(columns)
         dialog.set_child(toolbar)
         dialog.present(self.get_root())
 
@@ -1532,15 +2006,10 @@ class ProjectDetail(Gtk.Box):
         caption = Gtk.Label(xalign=0)
         caption.add_css_class("caption")
         caption.add_css_class("dim-label")
-        if mode == "auto":
-            found = icons.find_auto_icon(self._project.get("root_path") or "")
-            caption.set_label(
-                f"Auto: {found}" if found else "Auto: no favicon found — using letter"
-            )
-        elif mode == "custom":
-            caption.set_label(f"Custom: {self._project.get('icon_path') or '?'}")
+        if mode == "custom":
+            caption.set_label(f"Uploaded: {self._project.get('icon_path') or '?'}")
         else:
-            caption.set_label("Letter avatar")
+            caption.set_label("No uploaded icon")
         box.append(caption)
 
         def set_mode(new_mode: str, icon_path: str | None = None):
@@ -1556,10 +2025,6 @@ class ProjectDetail(Gtk.Box):
             if self._on_icon_changed:
                 self._on_icon_changed(self._project["id"])
             dialog.close()
-
-        auto_btn = Gtk.Button(label="Use auto (scan favicon)")
-        auto_btn.connect("clicked", lambda *_: set_mode("auto"))
-        box.append(auto_btn)
 
         upload_btn = Gtk.Button(label="Upload image…")
 
@@ -1592,9 +2057,11 @@ class ProjectDetail(Gtk.Box):
         upload_btn.connect("clicked", on_upload)
         box.append(upload_btn)
 
-        none_btn = Gtk.Button(label="No icon (letter avatar)")
-        none_btn.connect("clicked", lambda *_: set_mode("none"))
-        box.append(none_btn)
+        if mode == "custom":
+            remove_btn = Gtk.Button(label="Remove icon")
+            remove_btn.add_css_class("destructive-action")
+            remove_btn.connect("clicked", lambda *_: set_mode("none"))
+            box.append(remove_btn)
 
         cancel = Gtk.Button(label="Cancel")
         cancel.set_halign(Gtk.Align.END)

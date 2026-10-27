@@ -17,8 +17,9 @@ restarted on the same port. This drops any in-flight MCP sessions for other
 projects — fine for a single-user local tool, not fine for a public
 multi-tenant service.
 
-Auth is capability-URL style: the copied URL includes `?token=...`, and the
-middleware accepts either that query parameter or `Authorization: Bearer ...`.
+Auth is capability-URL style: the copied URL includes the token as a path
+segment, and the middleware also accepts the legacy `?token=...` query
+parameter or `Authorization: Bearer ...`..
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from __future__ import annotations
 import json
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any, MutableMapping
 from urllib.parse import parse_qs
 
 import uvicorn
@@ -62,13 +64,48 @@ class _TokenAuthMiddleware:
             await self._deny(send, 404, "unknown or stopped project")
             return
 
-        if self._extract_token(scope) != expected:
+        token = self._extract_token(scope)
+        if token != expected:
             await self._deny(send, 401, "invalid or missing token")
             return
 
-        await self._app(scope, receive, send)
+        # Some MCP clients strip query parameters while validating a server
+        # URL. Keep capability URLs compatible with those clients by accepting
+        # /mcp/{project_id}/{token}, then route the request to FastMCP's
+        # canonical /mcp/{project_id} endpoint.
+        if len(parts) == 3 and scope["path"] == f"/mcp/{project_id}/{expected}":
+            scope = dict(scope)
+            scope["path"] = f"/mcp/{project_id}"
+            scope["raw_path"] = scope["path"].encode()
+
+        if scope.get("method") != "GET":
+            await self._app(scope, receive, send)
+            return
+
+        # Send an immediate SSE comment. Cloudflare and connector validators
+        # otherwise may wait for the first event forever on an idle GET stream.
+        async def send_with_heartbeat(message: MutableMapping[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                await send(message)
+                headers = dict(message.get("headers") or [])
+                if headers.get(b"content-type", b"").startswith(b"text/event-stream"):
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": b": malt connected\n\n",
+                            "more_body": True,
+                        }
+                    )
+                return
+            await send(message)
+
+        await self._app(scope, receive, send_with_heartbeat)
 
     def _extract_token(self, scope: Scope) -> str | None:
+        parts = [p for p in scope["path"].split("/") if p]
+        if len(parts) == 3 and parts[0] == "mcp":
+            return parts[2]
+
         headers = dict(scope.get("headers") or [])
         auth = headers.get(b"authorization", b"").decode()
         if auth.lower().startswith("bearer "):

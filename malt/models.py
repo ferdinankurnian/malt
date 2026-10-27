@@ -12,7 +12,9 @@ class Project:
         name: str = "",
         root_path: str = "",
         permission: str = "read",
-        allowed_commands: list[str] | None = None,
+        allowed_commands: list[dict | str] | None = None,
+        file_permissions: list[str] | None = None,
+        terminal_permission: str = "off",
         token: str = "",
         mcp_port: int = 3100,
         tunnel_enabled: bool = False,
@@ -24,7 +26,11 @@ class Project:
         self.name = name
         self.root_path = root_path
         self.permission = permission
-        self.allowed_commands: list[str] = allowed_commands or []
+        self.allowed_commands: list[dict | str] = allowed_commands or []
+        self.file_permissions: list[str] = (
+            ["read"] if file_permissions is None else file_permissions
+        )
+        self.terminal_permission = terminal_permission or "off"
         self.token = token
         self.mcp_port = mcp_port
         self.tunnel_enabled = tunnel_enabled
@@ -37,12 +43,19 @@ class Project:
         cmds = (
             json.loads(row["allowed_commands"]) if row.get("allowed_commands") else []
         )
+        file_permissions = (
+            json.loads(row["file_permissions"])
+            if row.get("file_permissions")
+            else None
+        )
         return cls(
             project_id=row["id"],
             name=row["name"],
             root_path=row["root_path"],
             permission=row["permission"],
             allowed_commands=cmds,
+            file_permissions=file_permissions,
+            terminal_permission=row.get("terminal_permission", "off"),
             token=row["token"],
             mcp_port=row.get("mcp_port", 3100),
             tunnel_enabled=bool(row.get("tunnel_enabled", 0)),

@@ -8,11 +8,11 @@ gi.require_version("cairo", "1.0")
 # don't let --fix strip it.
 from gi.repository import Gtk, Gdk, cairo  # noqa: E402,F401
 
-from .. import icons
+from .. import icons  # noqa: E402
 
 _STATUS_COLORS = {
     "stopped": "#555555",
-    "running": "#26a269",
+    "running": "#39ff88",
 }
 
 
@@ -108,12 +108,12 @@ class ProjectList(Gtk.Box):
         header_box.set_margin_top(8)
         header_box.set_margin_bottom(8)
 
-        self._search_btn = Gtk.ToggleButton()
+        self._search_btn = Gtk.Button()
         self._search_btn.set_icon_name("edit-find-symbolic")
         self._search_btn.set_tooltip_text("Search projects")
         self._search_btn.add_css_class("flat")
         self._search_btn.set_size_request(32, 32)
-        self._search_btn.connect("toggled", self._on_search_toggled)
+        self._search_btn.connect("clicked", self._on_search_clicked)
         header_box.append(self._search_btn)
 
         header = Gtk.Label(label="malt")
@@ -138,7 +138,7 @@ class ProjectList(Gtk.Box):
         search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         search_box.set_margin_start(10)
         search_box.set_margin_end(10)
-        search_box.set_margin_top(2)
+        search_box.set_margin_top(0)
         search_box.set_margin_bottom(2)
         self._search_entry = Gtk.SearchEntry()
         self._search_entry.set_hexpand(True)
@@ -164,14 +164,12 @@ class ProjectList(Gtk.Box):
         if self._on_settings:
             self._on_settings(button)
 
-    def _on_search_toggled(self, button):
-        active = button.get_active()
-        self._search_revealer.set_reveal_child(active)
-        if active:
-            button.set_icon_name("window-close-symbolic")
+    def _on_search_clicked(self, button):
+        showing = not self._search_revealer.get_reveal_child()
+        self._search_revealer.set_reveal_child(showing)
+        if showing:
             self._search_entry.grab_focus()
         else:
-            button.set_icon_name("edit-find-symbolic")
             self._search_entry.set_text("")
 
     def _on_search_changed(self, entry):

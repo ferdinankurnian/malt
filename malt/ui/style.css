@@ -23,7 +23,7 @@
 
 /* Active indicator dot */
 .success {
-    color: #26a269;
+    color: #39ff88;
 }
 
 /* ── Project detail layout ─────────────────────────────────────────── */
@@ -96,4 +96,22 @@
 
 .detail-field-body {
     background: transparent;
+}
+
+/* Settings dialog — seamless header */
+dialog .header-bar {
+    background: transparent;
+    border-bottom: none;
+    box-shadow: none;
+}
+
+/* Domains master-detail list */
+.domains-list row {
+    border-radius: 10px;
+    margin: 2px 6px;
+    min-height: 40px;
+}
+
+.domains-list row:hover {
+    background: alpha(@borders, 0.15);
 }

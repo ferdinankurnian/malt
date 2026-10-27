@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS projects (
     root_path TEXT NOT NULL,
     permission TEXT NOT NULL DEFAULT 'read',
     allowed_commands TEXT,
+    file_permissions TEXT NOT NULL DEFAULT '["read"]',
+    terminal_permission TEXT NOT NULL DEFAULT 'off',
     token TEXT NOT NULL UNIQUE,
     mcp_port INTEGER DEFAULT 3100,
     tunnel_enabled INTEGER DEFAULT 0,
@@ -59,6 +61,37 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if "icon_path" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN icon_path TEXT")
+    if "file_permissions" not in cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN file_permissions TEXT DEFAULT '[\"read\"]'"
+        )
+        conn.execute(
+            """
+            UPDATE projects
+            SET file_permissions = CASE permission
+                WHEN 'write' THEN '["read", "write", "create"]'
+                WHEN 'execute' THEN '["read", "write", "create"]'
+                WHEN 'admin' THEN '["read", "write", "create", "delete"]'
+                ELSE '["read"]'
+            END
+            WHERE file_permissions IS NULL OR file_permissions = '["read"]'
+            """
+        )
+    if "terminal_permission" not in cols:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN terminal_permission TEXT DEFAULT 'off'"
+        )
+        conn.execute(
+            """
+            UPDATE projects
+            SET terminal_permission = CASE permission
+                WHEN 'execute' THEN 'allowlist'
+                WHEN 'admin' THEN 'full'
+                ELSE 'off'
+            END
+            WHERE terminal_permission IS NULL OR terminal_permission = 'off'
+            """
+        )
 
 
 def init_db() -> None:
@@ -69,13 +102,44 @@ def init_db() -> None:
     conn.close()
 
 
-def create_project(name: str, root_path: str, permission: str = "read") -> dict:
+def _legacy_policy(permission: str) -> tuple[str, str]:
+    """Map the old single permission value to the capability policy."""
+    policies = {
+        "read": ('["read"]', "off"),
+        "write": ('["read", "write", "create"]', "off"),
+        "execute": ('["read", "write", "create"]', "allowlist"),
+        "admin": ('["read", "write", "create", "delete"]', "full"),
+    }
+    return policies.get(permission, policies["read"])
+
+
+def create_project(
+    name: str,
+    root_path: str,
+    permission: str = "read",
+    file_permissions: str | None = None,
+    terminal_permission: str | None = None,
+) -> dict:
     project_id = uuid.uuid4().hex[:12]
     token = secrets.token_hex(16)
     conn = _connect()
+    if file_permissions is None or terminal_permission is None:
+        file_permissions, terminal_permission = _legacy_policy(permission)
     conn.execute(
-        "INSERT INTO projects (id, name, root_path, permission, token) VALUES (?, ?, ?, ?, ?)",
-        (project_id, name, root_path, permission, token),
+        """
+        INSERT INTO projects
+            (id, name, root_path, permission, token, file_permissions, terminal_permission)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            project_id,
+            name,
+            root_path,
+            permission,
+            token,
+            file_permissions,
+            terminal_permission,
+        ),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
@@ -110,6 +174,8 @@ def update_project(project_id: str, **fields) -> dict | None:
         "root_path",
         "permission",
         "allowed_commands",
+        "file_permissions",
+        "terminal_permission",
         "mcp_port",
         "tunnel_enabled",
         "domain_id",

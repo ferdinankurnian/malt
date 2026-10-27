@@ -86,19 +86,19 @@ def resolve_icon_file(
     return find_auto_icon(root_path)
 
 
-_DARK_PALETTE: list[tuple[float, float, float]] = [
-    (0.18, 0.29, 0.46),  # muted blue
-    (0.30, 0.20, 0.38),  # deep purple
-    (0.16, 0.34, 0.35),  # dark teal
-    (0.34, 0.22, 0.22),  # wine
-    (0.20, 0.32, 0.24),  # forest
-    (0.35, 0.27, 0.18),  # amber brown
-    (0.26, 0.22, 0.36),  # indigo
-    (0.18, 0.32, 0.30),  # slate teal
-    (0.32, 0.18, 0.28),  # plum
-    (0.22, 0.28, 0.38),  # steel blue
-    (0.30, 0.24, 0.20),  # warm earth
-    (0.20, 0.26, 0.34),  # navy
+_VIVID_PALETTE: list[tuple[float, float, float]] = [
+    (0.08, 0.42, 0.72),
+    (0.43, 0.18, 0.72),
+    (0.04, 0.52, 0.48),
+    (0.72, 0.18, 0.24),
+    (0.12, 0.52, 0.28),
+    (0.72, 0.42, 0.08),
+    (0.25, 0.28, 0.72),
+    (0.05, 0.48, 0.62),
+    (0.62, 0.16, 0.46),
+    (0.12, 0.38, 0.68),
+    (0.58, 0.28, 0.10),
+    (0.18, 0.34, 0.58),
 ]
 
 
@@ -109,7 +109,7 @@ def _letter_and_color(name: str, project_id: str) -> tuple[str, tuple[float, flo
             ch = c.upper()
             break
     h = int(hashlib.md5((project_id or name or "x").encode()).hexdigest()[:8], 16)
-    r, g, b = _DARK_PALETTE[h % len(_DARK_PALETTE)]
+    r, g, b = _VIVID_PALETTE[h % len(_VIVID_PALETTE)]
     return ch, (r, g, b)
 
 

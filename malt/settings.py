@@ -11,6 +11,10 @@ SETTINGS_PATH = Path.home() / ".config" / "malt" / "settings.json"
 
 DEFAULTS: dict[str, Any] = {
     "tunnel_provider": "cloudflare",
+    "tunnel_backend": "cf",
+    "cf_tunnel_id": "",
+    "cf_tunnel_name": "malt",
+    "cf_profile": "",
     "domains": [],
     "default_mcp_port": 3100,
     "url_visible_by_default": False,

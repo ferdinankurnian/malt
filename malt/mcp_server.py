@@ -5,13 +5,21 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
 from . import db
-from .security import safe_path, PERMISSION_LEVELS, ALLOWED_CMDS
+from .security import (
+    ALLOWED_CMDS,
+    allowed_tools,
+    command_allowed,
+    command_rules,
+    project_policy,
+    safe_path,
+)
 
 _MAX_LOG = 2000
 
@@ -36,9 +44,9 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
     )
 
     root = project["root_path"]
-    perm = project["permission"]
     project_id = project["id"]
-    allowed_tools = PERMISSION_LEVELS.get(perm, [])
+    file_permissions, terminal_permission = project_policy(project)
+    enabled_tools = allowed_tools(project)
 
     def log_call(tool_name: str, arguments: dict, response: str, success: bool) -> None:
         # redact huge bodies (write_file content, etc.)
@@ -75,15 +83,17 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
 
         return wrapper
 
-    @mcp.tool()
-    @logged
-    def list_directory(path: str = ".") -> str:
-        """List directory contents."""
-        dir_path = safe_path(root, path)
-        entries = os.listdir(dir_path)
-        return "\n".join(sorted(entries)) if entries else "(empty)"
+    if "list_directory" in enabled_tools:
 
-    if "read_file" in allowed_tools:
+        @mcp.tool()
+        @logged
+        def list_directory(path: str = ".") -> str:
+            """List directory contents."""
+            dir_path = safe_path(root, path)
+            entries = os.listdir(dir_path)
+            return "\n".join(sorted(entries)) if entries else "(empty)"
+
+    if "read_file" in enabled_tools:
 
         @mcp.tool()
         @logged
@@ -109,7 +119,7 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
             numbered = [f"{i + start + 1}|{line}" for i, line in enumerate(selected)]
             return "".join(numbered)
 
-    if "file_info" in allowed_tools:
+    if "file_info" in enabled_tools:
 
         @mcp.tool()
         @logged
@@ -127,7 +137,7 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
                 f"mode: {oct(st.st_mode)[-3:]}"
             )
 
-    if "search" in allowed_tools:
+    if "search" in enabled_tools:
 
         @mcp.tool()
         @logged
@@ -185,21 +195,39 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
             header = f"{count} match(es)" + (" (truncated)" if count >= max_matches else "")
             return header + "\n\n" + "\n\n".join(matches)
 
-    if "write_file" in allowed_tools:
+    if "write_file" in enabled_tools:
 
         @mcp.tool()
         @logged
         def write_file(path: str, content: str) -> str:
-            """Write content to file (full overwrite)."""
+            """Create a new file or overwrite an existing file."""
             file_path = safe_path(root, path)
+            if os.path.exists(file_path) and "write" not in file_permissions:
+                return "error: write & edit files permission required"
+            if not os.path.exists(file_path) and "create" not in file_permissions:
+                return "error: create files & directories permission required"
             parent = os.path.dirname(file_path)
             if parent:
+                if not os.path.exists(parent) and "create" not in file_permissions:
+                    return "error: create files & directories permission required"
                 os.makedirs(parent, exist_ok=True)
             with open(file_path, "w") as f:
                 f.write(content)
             return "ok"
 
-    if "edit_file" in allowed_tools:
+    if "create_directory" in enabled_tools:
+
+        @mcp.tool()
+        @logged
+        def create_directory(path: str) -> str:
+            """Create a directory and its missing parents within the project root."""
+            directory = safe_path(root, path)
+            if os.path.exists(directory):
+                return "error: path already exists"
+            os.makedirs(directory)
+            return "ok"
+
+    if "edit_file" in enabled_tools:
 
         @mcp.tool()
         @logged
@@ -229,21 +257,24 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
                 f.write(new_content)
             return f"ok ({count} replacement(s))"
 
-    if "delete_file" in allowed_tools:
+    if "delete_file" in enabled_tools:
 
         @mcp.tool()
         @logged
         def delete_file(path: str) -> str:
-            """Delete a file. Refuses directories."""
+            """Delete a file or directory within the project root."""
             target = safe_path(root, path)
+            if target == os.path.realpath(root):
+                return "error: cannot delete the project root"
             if os.path.isdir(target):
-                return "error: path is a directory (delete_file only works on files)"
+                shutil.rmtree(target)
+                return "ok"
             if not os.path.exists(target):
                 return "error: path does not exist"
             os.remove(target)
             return "ok"
 
-    if "move_file" in allowed_tools:
+    if "move_file" in enabled_tools:
 
         @mcp.tool()
         @logged
@@ -255,32 +286,31 @@ def create_mcp_server(project: dict, streamable_http_path: str = "/mcp") -> Fast
                 return "error: source does not exist"
             parent = os.path.dirname(dest_path)
             if parent:
+                if not os.path.exists(parent) and "create" not in file_permissions:
+                    return "error: create files & directories permission required"
                 os.makedirs(parent, exist_ok=True)
             os.rename(src_path, dest_path)
             return "ok"
 
-    if "run_command" in allowed_tools:
-        is_admin = perm == "admin"
-        custom_cmds: list[str] = []
-        if not is_admin:
-            custom_cmds = json.loads(project.get("allowed_commands", "[]") or "[]")
+    if "run_command" in enabled_tools:
+        rules = command_rules(project)
 
         @mcp.tool()
         @logged
         def run_command(cmd: str) -> str:
-            """Run a command. Admin: any command. Execute: only exact-matched allowed commands."""
+            """Run a command according to this project's terminal policy."""
             cmd = cmd.strip()
             if not cmd:
                 return "error: empty command"
 
-            if is_admin:
+            if terminal_permission == "full":
                 try:
                     argv = shlex.split(cmd)
                 except ValueError as e:
                     return f"error: invalid command syntax: {e}"
-            elif custom_cmds:
-                if cmd not in custom_cmds:
-                    return f"error: command not whitelisted: {cmd}"
+            elif rules:
+                if not command_allowed(cmd, rules):
+                    return f"error: command not allowed: {cmd}"
                 try:
                     argv = shlex.split(cmd)
                 except ValueError as e:

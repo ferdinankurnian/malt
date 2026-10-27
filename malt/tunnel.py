@@ -1,8 +1,8 @@
 """Multi-provider tunnel process manager.
 
 One tunnel process for the whole app (not per project). Supports:
-- cloudflare named tunnels (custom hostnames via ~/.cloudflared/config.yml)
-- cloudflare quick tunnels (ephemeral *.trycloudflare.com)
+- cloudflare named tunnels via `cf` (preferred) or `cloudflared` fallback
+- cloudflare quick tunnels via `cf tunnels quick-start` (preferred)
 - ngrok (dev domain / configured domain)
 
 Legacy callers may still use start(hostname, port). Prefer start_domains().
@@ -28,6 +28,12 @@ class DomainConfig:
     hostname: str
     provider: str  # "cloudflare" | "ngrok"
     mode: str  # "named" | "quick" | "dev"
+
+
+def detect_cf() -> dict[str, Any]:
+    from . import cfcli as cf_mod
+
+    return cf_mod.detect_cf()
 
 
 def detect_cloudflared() -> dict[str, Any]:
@@ -166,6 +172,39 @@ class TunnelManager:
     # ── Cloudflare ──────────────────────────────────────────────
 
     def _start_cloudflare_named(self, domains: list[DomainConfig], port: int) -> bool:
+        # Preferred: `cf tunnels run <tunnel>` — uses cf-managed cloudflared
+        # with the same local credentials. Ingress + DNS are managed via the
+        # cf API (see cfcli + cloudflare.ensure_ingress), so the tunnel just
+        # needs to run; no generated config file anymore.
+        try:
+            from . import cfcli as cf_mod
+            from . import settings as settings_mod
+
+            if cf_mod.detect_cf()["found"] and cf_mod.auth_status().get(
+                "authenticated"
+            ):
+                tunnel_ref = (
+                    settings_mod.get("cf_tunnel_name") or "malt"
+                ).strip() or "malt"
+                tunnel_id = (settings_mod.get("cf_tunnel_id") or "").strip()
+                # Prefer stored id, fall back to name (cf resolves both).
+                ref = tunnel_id or tunnel_ref
+                if cf_mod.list_tunnels():
+                    # Ensure local ingress covers the requested hostnames so a
+                    # locally-managed tunnel actually routes them.
+                    try:
+                        from . import cloudflare as cf_legacy
+
+                        for d in domains:
+                            cf_legacy.ensure_ingress(d.hostname, port)
+                    except Exception:
+                        pass
+                    if self._spawn(cf_mod.run_cmd(ref), provider="cloudflare"):
+                        return True
+                    # fall through to cloudflared fallback below
+        except Exception:
+            pass
+
         config = self._named_tunnel_config([d.hostname for d in domains], port)
         if config is None:
             # Fall back to first hostname via quick-ish legacy command
@@ -185,6 +224,19 @@ class TunnelManager:
         return self._spawn(cmd, provider="cloudflare")
 
     def _start_cloudflare_quick(self, port: int) -> bool:
+        try:
+            from . import cfcli as cf_mod
+
+            if cf_mod.detect_cf()["found"]:
+                ok = self._spawn(
+                    cf_mod.quick_start_cmd(f"http://localhost:{port}"),
+                    provider="cloudflare",
+                    parse_quick=True,
+                )
+                if ok:
+                    return True
+        except Exception:
+            pass
         cmd = [
             "cloudflared",
             "tunnel",
@@ -313,6 +365,18 @@ class TunnelManager:
                 if self._quick_url or not self.is_running():
                     break
                 time.sleep(0.2)
+            if not self._quick_url:
+                # A live child is not sufficient: quick tunnels are only
+                # usable once the provider has published a public URL.
+                if self.is_running():
+                    self._proc.terminate()
+                    try:
+                        self._proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self._proc.kill()
+                self._proc = None
+                self._provider = None
+                return False
 
         return self.is_running()
 
